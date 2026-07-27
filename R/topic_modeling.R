@@ -1,0 +1,3727 @@
+#' @importFrom utils modifyList str
+#' @importFrom stats cor as.formula glm.control poisson vcov
+NULL
+
+# Suppress R CMD check notes for NSE variables
+utils::globalVariables(c("K", "metric", "value", "label", "hover_text"))
+
+# Topic Modeling Functions
+# Functions for topic modeling, analysis, and evaluation
+
+.number_labeller <- function(digits) {
+  if (requireNamespace("numform", quietly = TRUE)) {
+    numform::ff_num(zero = 0, digits = digits)
+  } else {
+    scales::label_number(accuracy = 10^(-digits))
+  }
+}
+
+.embedding_silhouette <- function(model) {
+  coords <- model$embeddings
+  clusters <- model$topic_assignments
+  if (is.null(coords) || is.null(clusters)) return(NA_real_)
+  if (length(unique(clusters)) < 2 || nrow(coords) < 2) return(NA_real_)
+  if (!requireNamespace("cluster", quietly = TRUE)) return(NA_real_)
+  # L2-normalize so euclidean dist matches the cosine space clustering used
+  norms <- pmax(sqrt(rowSums(coords^2)), 1e-12)
+  coords <- coords / norms
+  tryCatch(
+    mean(cluster::silhouette(as.integer(as.factor(clusters)), stats::dist(coords))[, 3]),
+    error = function(e) NA_real_
+  )
+}
+
+
+#' @title Find Optimal Number of Topics
+#' @description Searches for the optimal number of topics (K) using stm::searchK.
+#'   Produces diagnostic plots to help select the best K value. The default
+#'   spectral initialization is deterministic; with LDA or random
+#'   initialization, fit several seeds per K before selecting a model.
+#' @param dfm_object A quanteda dfm object to be used for topic modeling.
+#' @param topic_range A vector of K values to test (e.g., 2:10).
+#' @param max.em.its Maximum number of EM iterations (default: 75).
+#' @param emtol Convergence tolerance for EM algorithm (default: 1e-04).
+#'   Higher values (e.g., 1e-03) speed up fitting but may reduce precision.
+#' @param cores Number of CPU cores to use for parallel processing (default: 1).
+#'   Set to higher values for faster searchK on multi-core systems.
+#' @param categorical_var Optional categorical variable(s) for prevalence.
+#' @param continuous_var Optional continuous variable(s) for prevalence.
+#' @param height Plot height in pixels (default: 600).
+#' @param width Plot width in pixels (default: 800).
+#' @param verbose Logical indicating whether to print progress (default: TRUE).
+#' @param ... Additional arguments passed to stm::searchK.
+#' @return A list containing search results and diagnostic plots.
+#' @concept topic-modeling
+#' @seealso [plot_quality_metrics()] to visualize topic-count diagnostics; `stm::stm()` to fit the chosen model; [fit_embedding_model()] for an embedding-based alternative to STM
+#' @export
+find_optimal_k <- function(dfm_object,
+                           topic_range,
+                           max.em.its = 75,
+                           emtol = 1e-04,
+                           cores = 1,
+                           categorical_var = NULL,
+                           continuous_var = NULL,
+                           height = 600,
+                           width = 800,
+                           verbose = TRUE, ...) {
+  out <- quanteda::convert(dfm_object, to = "stm")
+  if (is.null(out$meta) || is.null(out$documents) || is.null(out$vocab)) {
+    stop("Conversion to STM format failed. Please ensure your dfm_object is correctly formatted.")
+  }
+  categorical_var <- if (!is.null(categorical_var)) as.character(categorical_var) else NULL
+  continuous_var <- if (!is.null(continuous_var)) as.character(continuous_var) else NULL
+  if (!is.null(categorical_var)) {
+    categorical_var <- unlist(strsplit(categorical_var, ",\\s*"))
+  }
+  if (!is.null(continuous_var)) {
+    continuous_var <- unlist(strsplit(continuous_var, ",\\s*"))
+  }
+  missing_vars <- setdiff(c(categorical_var, continuous_var), names(out$meta))
+  if (length(missing_vars) > 0) {
+    stop("The following variables are missing in the metadata: ",
+         paste(missing_vars, collapse = ", "))
+  }
+  terms <- c()
+  if (!is.null(categorical_var) && length(categorical_var) > 0) {
+    terms <- c(terms, categorical_var)
+  }
+  if (!is.null(continuous_var) && length(continuous_var) > 0) {
+    terms <- c(terms, continuous_var)
+  }
+  prevalence_formula <- if (length(terms) > 0) {
+    as.formula(paste("~", paste(terms, collapse = " + ")))
+  } else {
+    NULL
+  }
+  search_result <- tryCatch({
+    stm::searchK(
+      data = out$meta,
+      documents = out$documents,
+      vocab = out$vocab,
+      max.em.its = max.em.its,
+      emtol = emtol,
+      cores = cores,
+      init.type = "Spectral",
+      K = topic_range,
+      prevalence = prevalence_formula,
+      verbose = verbose,
+      ...
+    )
+  }, error = function(spectral_error) {
+    # Fallback to LDA initialization if Spectral fails
+    if (grepl("chol|decomposition|singular", spectral_error$message, ignore.case = TRUE)) {
+      if (verbose) message("Spectral initialization failed. Trying LDA initialization...")
+      stm::searchK(
+        data = out$meta,
+        documents = out$documents,
+        vocab = out$vocab,
+        max.em.its = max.em.its,
+        emtol = emtol,
+        cores = cores,
+        init.type = "LDA",
+        K = topic_range,
+        prevalence = prevalence_formula,
+        verbose = verbose,
+        ...
+      )
+    } else {
+      stop("Error in stm::searchK: ", spectral_error$message)
+    }
+  })
+  
+  # Clean and prepare results data
+  results_clean <- search_result$results
+  for (col in names(results_clean)) {
+    if (is.list(results_clean[[col]])) {
+      results_clean[[col]] <- unlist(results_clean[[col]])
+    }
+    if (col %in% c("residual", "lbound", "heldout", "semcoh", "K")) {
+      results_clean[[col]] <- as.numeric(results_clean[[col]])
+    }
+  }
+  
+  # Return the same structure as stm::searchK for compatibility
+  list(
+    results = results_clean,
+    call = match.call(),
+    settings = list(
+      topic_range = topic_range,
+      max.em.its = max.em.its
+    )
+  )
+}
+
+
+#' Select Top Terms for Each Topic
+#'
+#' This function selects the top terms for each topic based on their word
+#' probability distribution (beta).
+#'
+#' @param stm_model An STM model object.
+#' @param top_term_n The number of top terms to display for each topic (default: 10).
+#' @param verbose Logical, if TRUE, prints progress messages.
+#' @param ... Further arguments passed to tidytext::tidy.
+#'
+#' @return A data frame containing the top terms for each topic.
+#'
+#' @concept topic-modeling
+#' @export
+#'
+#' @examples
+#' if (interactive() && requireNamespace("stm", quietly = TRUE)) {
+#'   mydata <- TextAnalysisR::SpecialEduTech
+#'
+#'   united_tbl <- TextAnalysisR::unite_cols(
+#'     mydata,
+#'     listed_vars = c("title", "keyword", "abstract")
+#'   )
+#'
+#'   tokens <- TextAnalysisR::prep_texts(united_tbl, text_field = "united_texts")
+#'
+#'   dfm_object <- quanteda::dfm(tokens)
+#'
+#'   out <- quanteda::convert(dfm_object, to = "stm")
+#'
+#'   stm_15 <- stm::stm(
+#'     data = out$meta,
+#'     documents = out$documents,
+#'     vocab = out$vocab,
+#'     max.em.its = 75,
+#'     init.type = "Spectral",
+#'     K = 15,
+#'     prevalence = ~ reference_type + s(year),
+#'     verbose = TRUE
+#'   )
+#'
+#'   top_topic_terms <- TextAnalysisR::get_topic_terms(
+#'     stm_model = stm_15,
+#'     top_term_n = 10,
+#'     verbose = TRUE
+#'   )
+#'   print(top_topic_terms)
+#' }
+get_topic_terms <- function(stm_model,
+                             top_term_n = 10,
+                             verbose = TRUE,
+                             ...) {
+
+  beta_td <- tidytext::tidy(stm_model, matrix = "beta", ...)
+
+  top_topic_terms <- beta_td %>%
+    dplyr::group_by(topic) %>%
+    dplyr::slice_max(order_by = beta, n = top_term_n) %>%
+    dplyr::ungroup()
+
+  return(top_topic_terms)
+}
+
+
+#' Get Topic Prevalence (Gamma) from STM Model
+#'
+#' Extracts topic prevalence values (gamma/theta) from a fitted STM model,
+#' returning mean prevalence for each topic as a data frame.
+#'
+#' @param stm_model A fitted STM model object from stm::stm().
+#' @param category Optional character string to add as a category column.
+#' @param include_theta Logical, if TRUE includes document-topic matrix (default: FALSE).
+#'
+#' @return A data frame with columns:
+#'   \item{topic}{Topic number}
+#'   \item{gamma}{Mean topic prevalence across documents}
+#'   \item{category}{Category label (if provided)}
+#'
+#' @concept topic-modeling
+#' @export
+#'
+#' @examples
+#' if (interactive() && requireNamespace("stm", quietly = TRUE)) {
+#'   # Requires fitting an STM model first; uses 'stm::gadarian' for demo
+#'   data("gadarian", package = "stm")
+#'   proc <- stm::textProcessor(gadarian$open.ended.response, metadata = gadarian)
+#'   prep <- stm::prepDocuments(proc$documents, proc$vocab, proc$meta)
+#'   topic_model <- stm::stm(prep$documents, prep$vocab, K = 3,
+#'                            data = prep$meta, max.em.its = 5,
+#'                            verbose = FALSE)
+#'   prevalence <- get_topic_prevalence(topic_model)
+#'   prevalence_label <- get_topic_prevalence(topic_model, category = "demo")
+#' }
+get_topic_prevalence <- function(stm_model,
+                                  category = NULL,
+                                  include_theta = FALSE) {
+
+  if (!inherits(stm_model, "STM")) {
+    stop("stm_model must be a fitted STM model object")
+  }
+
+  theta <- stm_model$theta
+  n_topics <- ncol(theta)
+
+  result <- data.frame(
+    topic = seq_len(n_topics),
+    gamma = colMeans(theta)
+  )
+
+  if (!is.null(category)) {
+    result$category <- category
+  }
+
+  if (include_theta) {
+    attr(result, "theta") <- theta
+  }
+
+  result
+}
+
+
+#' Convert Topic Terms to Text Strings
+#'
+#' Concatenates top terms for each topic into text strings suitable for
+#' embedding generation. Useful for creating topic representations for
+#' semantic similarity analysis.
+#'
+#' @param top_terms_df A data frame containing top terms for topics, typically
+#'   output from \code{\link{get_topic_terms}}.
+#' @param topic_var Name of the column containing topic identifiers (default: "topic").
+#' @param term_var Name of the column containing terms (default: "term").
+#' @param weight_var Optional name of column with term weights (e.g., "beta").
+#'   If provided, terms are ordered by weight before concatenation.
+#' @param sep Separator between terms (default: " ").
+#' @param top_n Optional number of top terms to include per topic (default: NULL, uses all).
+#'
+#' @return A character vector of topic text strings, one per topic, ordered by topic number.
+#'
+#' @concept topic-modeling
+#' @export
+#'
+#' @examples
+#' # Topic-term frame as produced by get_topic_terms()
+#' top_terms <- data.frame(
+#'   topic = c(1, 1, 1, 2, 2, 2),
+#'   term  = c("calculator", "arithmetic", "elementary",
+#'             "computer", "instruction", "multiplication"),
+#'   prob  = c(0.10, 0.08, 0.07, 0.12, 0.09, 0.06)
+#' )
+#' get_topic_texts(top_terms)
+#' get_topic_texts(top_terms, weight_var = "prob", top_n = 2)
+get_topic_texts <- function(top_terms_df,
+                             topic_var = "topic",
+                             term_var = "term",
+                             weight_var = NULL,
+                             sep = " ",
+                             top_n = NULL) {
+
+  if (!topic_var %in% names(top_terms_df)) {
+    stop("topic_var '", topic_var, "' not found in top_terms_df")
+  }
+  if (!term_var %in% names(top_terms_df)) {
+    stop("term_var '", term_var, "' not found in top_terms_df")
+  }
+
+  result <- top_terms_df %>%
+    dplyr::group_by(.data[[topic_var]])
+
+  if (!is.null(weight_var) && weight_var %in% names(top_terms_df)) {
+    result <- result %>%
+      dplyr::arrange(dplyr::desc(.data[[weight_var]]), .by_group = TRUE)
+  }
+
+  if (!is.null(top_n)) {
+    result <- result %>%
+      dplyr::slice_head(n = top_n)
+  }
+
+  result <- result %>%
+    dplyr::summarise(
+      text = paste(.data[[term_var]], collapse = sep),
+      .groups = "drop"
+    ) %>%
+    dplyr::arrange(.data[[topic_var]]) %>%
+    dplyr::pull(text)
+
+  result
+}
+
+
+#' Build a topic-term data frame from any supported topic model
+#'
+#' Unified helper that produces the long-format `data.frame(topic, term, beta)`
+#' expected by [generate_topic_labels()] from an STM model or an embedding result.
+#' Dispatches on the object's structure:
+#' - STM model (has `$beta$logbeta` and `$vocab`) -> top terms via [stm::labelTopics()] FREX
+#' - Embedding result (has `$topic_keywords`) -> c-TF-IDF keywords with rank-derived pseudo-beta
+#'
+#' @param model A topic model object (STM fit or embedding result).
+#' @param n Number of top terms per topic (default 7).
+#' @return `data.frame(topic, term, beta)` in long format.
+#' @concept topic-modeling
+#' @export
+extract_topic_terms_df <- function(model, n = 7) {
+  if (is.null(model)) return(data.frame(topic = integer(0), term = character(0), beta = numeric(0)))
+
+  # STM model
+  if (!is.null(model$beta) && !is.null(model$vocab)) {
+    label_result <- stm::labelTopics(model, n = n)
+    frex_terms <- label_result$frex
+    beta_matrix <- exp(model$beta$logbeta[[1]])
+    rows <- lapply(seq_len(nrow(frex_terms)), function(i) {
+      terms <- as.character(frex_terms[i, ])
+      vocab_idx <- match(terms, model$vocab)
+      data.frame(topic = i, term = terms, beta = beta_matrix[i, vocab_idx],
+                 stringsAsFactors = FALSE)
+    })
+    return(do.call(rbind, rows))
+  }
+
+  if (!is.null(model$topic_keywords)) {
+    rows <- lapply(seq_along(model$topic_keywords), function(i) {
+      words <- utils::head(as.character(model$topic_keywords[[i]]), n)
+      data.frame(topic = i, term = words,
+                 beta = seq(length(words), 1) / length(words),
+                 stringsAsFactors = FALSE)
+    })
+    return(do.call(rbind, rows))
+  }
+
+  data.frame(topic = integer(0), term = character(0), beta = numeric(0))
+}
+
+
+#' Generate Topic Labels Using AI
+#'
+#' This function generates descriptive labels for each topic based on their
+#' top terms using AI providers (OpenAI or Gemini).
+#'
+#' @param top_topic_terms A data frame containing the top terms for each topic.
+#' @param provider AI provider to use: "auto" (default), "openai", or "gemini".
+#'   "auto" picks the first provider with an available API key.
+#' @param model A character string specifying which model to use. If NULL, uses
+#'   provider defaults: "gpt-4.1-mini" (OpenAI), "gemini-2.5-flash-lite" (Gemini).
+#' @param system A character string containing the system prompt for the API.
+#'   If NULL, the function uses the default system prompt.
+#' @param user A character string containing the user prompt for the API.
+#'   If NULL, the function uses the default user prompt.
+#' @param temperature A numeric value controlling the randomness of the output (default: 0.5).
+#' @param api_key API key for OpenAI or Gemini. If NULL, uses environment variable.
+#' @param openai_api_key Deprecated. Use `api_key` instead. Kept for backward compatibility.
+#' @param verbose Logical, if TRUE, prints progress messages.
+#'
+#' @return A data frame containing the top terms for each topic along with their generated labels.
+#'
+#' @concept topic-modeling
+#' @seealso [get_topic_terms()] to extract top terms first; [generate_topic_content()] for survey items / RQs / themes grounded in the same terms; [call_llm_api()] for the direct AI provider call
+#' @export
+#'
+#' @examples
+#' if (interactive()) {
+#' top_topic_terms <- get_topic_terms(stm_model, top_term_n = 10)
+#'
+#' # Auto-detect provider (tries OpenAI -> Gemini)
+#' labels <- generate_topic_labels(top_topic_terms)
+#'
+#' # Use specific provider
+#' labels_openai <- generate_topic_labels(top_topic_terms, provider = "openai")
+#' labels_gemini <- generate_topic_labels(top_topic_terms, provider = "gemini")
+#' }
+generate_topic_labels <- function(top_topic_terms,
+                                  provider = "auto",
+                                  model = NULL,
+                                  system = NULL,
+                                  user = NULL,
+                                  temperature = 0.5,
+                                  api_key = NULL,
+                                  openai_api_key = NULL,
+                                  verbose = TRUE) {
+
+  if (!requireNamespace("httr", quietly = TRUE) ||
+      !requireNamespace("jsonlite", quietly = TRUE)) {
+    stop(
+      "The 'httr' and 'jsonlite' packages are required for this functionality. ",
+      "Please install them using install.packages(c('httr', 'jsonlite'))."
+    )
+  }
+
+  # Handle backward compatibility: openai_api_key -> api_key
+
+  if (!is.null(openai_api_key) && is.null(api_key)) {
+    api_key <- openai_api_key
+    if (provider == "auto") provider <- "openai"
+  }
+
+  if (provider == "auto") {
+    if (nzchar(Sys.getenv("OPENAI_API_KEY")) || (!is.null(api_key) && grepl("^sk-", api_key))) {
+      provider <- "openai"
+      if (verbose) message("Using OpenAI for topic label generation")
+    } else if (nzchar(Sys.getenv("GEMINI_API_KEY")) || (!is.null(api_key) && grepl("^AIza", api_key))) {
+      provider <- "gemini"
+      if (verbose) message("Using Gemini for topic label generation")
+    } else {
+      message("No AI provider available. Set OPENAI_API_KEY or GEMINI_API_KEY.")
+      return(invisible(NULL))
+    }
+  }
+
+  if (is.null(model)) {
+    model <- switch(provider,
+      "openai" = "gpt-4.1-mini",
+      "gemini" = "gemini-2.5-flash-lite"
+    )
+  }
+
+  if (is.null(api_key)) {
+    api_key <- switch(provider,
+      "openai" = Sys.getenv("OPENAI_API_KEY"),
+      "gemini" = Sys.getenv("GEMINI_API_KEY")
+    )
+  }
+
+  if (!nzchar(api_key)) {
+    return(.notify_missing_api_key(provider))
+  }
+
+  validation <- validate_api_key(api_key, strict = FALSE)
+  if (!validation$valid) {
+    message(sprintf("Invalid API key format: %s", validation$error))
+    return(invisible(NULL))
+  }
+
+  if (verbose) {
+    message("Generating topic labels for ", dplyr::n_distinct(top_topic_terms$topic),
+            " topics using ", provider, " (", model, ")...")
+  }
+
+  system_prompt <- "You generate short, descriptive topic labels from keyword lists.
+
+Rules:
+- Max 5 words per label. Title Case. No trailing punctuation.
+- Prioritize the keywords listed earliest (they have the highest weight).
+- Use person-first language (e.g., 'students with learning disabilities', not 'disabled students').
+- Each label must be distinct from other labels in the same model.
+- Return ONLY the label text. No quotes, numbering, or explanations.
+
+Example
+Keywords: virtual manipulatives, manipulatives, mathematical, app, solving, learning disability, algebra
+Label: Virtual Math Tools for Students with Disabilities"
+
+  # Use custom system prompt if provided
+  if (!is.null(system)) {
+    system_prompt <- system
+  }
+
+  top_topic_terms <- top_topic_terms %>%
+    dplyr::group_by(topic) %>%
+    dplyr::arrange(dplyr::desc(beta)) %>%
+    dplyr::ungroup()
+
+  unique_topics <- top_topic_terms %>%
+    dplyr::distinct(topic) %>%
+    dplyr::arrange(as.numeric(topic)) %>%
+    dplyr::mutate(topic_label = NA)
+
+  pb <- NULL
+  if (verbose && requireNamespace("progress", quietly = TRUE)) {
+    pb <- progress::progress_bar$new(
+      format = " Processing [:bar] :percent ETA: :eta",
+      total = nrow(unique_topics),
+      clear = FALSE, width = 60)
+  }
+
+  rate_limit_delay <- 1
+
+  for (i in seq_len(nrow(unique_topics))) {
+    if (!is.null(pb)) pb$tick()
+
+    current_topic <- unique_topics$topic[i]
+
+    selected_terms <- top_topic_terms %>%
+      dplyr::filter(topic == current_topic) %>%
+      dplyr::pull(term)
+
+    user_prompt <- paste0(
+      "I have a topic described by the following keywords (highest weight first): '",
+      paste(selected_terms, collapse = ", "),
+      "'. Based on the keywords, create a short label (max 5 words). Return only the label."
+    )
+
+    # Use custom user prompt if provided
+    if (!is.null(user)) {
+      user_prompt <- user
+    }
+
+    topic_label <- tryCatch({
+      response <- call_llm_api(
+        provider = provider,
+        system_prompt = system_prompt,
+        user_prompt = user_prompt,
+        model = model,
+        temperature = temperature,
+        max_tokens = 50,
+        api_key = api_key
+      )
+      label <- trimws(response)
+      label <- gsub("^\"(.*)\"$", "\\1", label)
+      label
+    }, error = function(e) {
+      warning(sprintf("API request failed for topic '%s': %s", current_topic, e$message))
+      NA_character_
+    })
+
+    unique_topics$topic_label[i] <- topic_label
+
+    Sys.sleep(rate_limit_delay)
+  }
+
+  top_labeled_topic_terms <- top_topic_terms %>%
+    dplyr::left_join(unique_topics, by = "topic") %>%
+    dplyr::select(topic_label, topic, term, beta) %>%
+    dplyr::arrange(topic, dplyr::desc(beta))
+
+  return(top_labeled_topic_terms)
+}
+
+#' @title Calculate Topic Probabilities
+#'
+#' @description
+#' Extracts and summarizes topic probabilities (gamma values) from an STM model,
+#' returning a formatted data table of mean topic prevalence.
+#'
+#' @param stm_model A fitted STM model object from stm::stm().
+#' @param top_n Number of top topics to display by prevalence (default: 10).
+#' @param verbose Logical, if TRUE prints progress messages (default: TRUE).
+#' @param ... Additional arguments passed to tidytext::tidy().
+#'
+#' @return A DT::datatable showing topics and their mean gamma (prevalence) values,
+#'   rounded to 3 decimal places.
+#'
+#' @concept topic-modeling
+#' @export
+#'
+#' @examples
+#' if (interactive()) {
+#'   data <- TextAnalysisR::SpecialEduTech
+#'   united <- unite_cols(data, c("title", "keyword", "abstract"))
+#'   tokens <- prep_texts(united, text_field = "united_texts")
+#'   dfm_obj <- quanteda::dfm(tokens)
+#'   stm_data <- quanteda::convert(dfm_obj, to = "stm")
+#'
+#'   topic_model <- stm::stm(
+#'     documents = stm_data$documents,
+#'     vocab = stm_data$vocab,
+#'     K = 10,
+#'     verbose = FALSE
+#'   )
+#'
+#'   prob_table <- calculate_topic_probability(topic_model, top_n = 10)
+#'   print(prob_table)
+#' }
+calculate_topic_probability <- function(stm_model,
+                                    top_n = 10,
+                                    verbose = TRUE,
+                                    ...) {
+
+  gamma_td <- tidytext::tidy(stm_model, matrix = "gamma", ...)
+
+  gamma_td %>%
+    dplyr::group_by(topic) %>%
+    dplyr::summarise(gamma = mean(gamma), .groups = "drop") %>%
+    dplyr::arrange(dplyr::desc(gamma)) %>%
+    dplyr::top_n(top_n, gamma) %>%
+    dplyr::mutate(gamma = round(gamma, 3))
+}
+
+#' @title Neural Topic Modeling
+#'
+#' @description
+#' Implements neural topic modeling using deep learning architectures for improved
+#' topic discovery and representation learning.
+#'
+#' @param texts Character vector of documents
+#' @param n_topics Number of topics to discover
+#' @param hidden_layers Number of hidden layers in neural network
+#' @param hidden_units Number of units per hidden layer
+#' @param dropout_rate Dropout rate for regularization
+#' @param embedding_model Transformer model for initial embeddings
+#' @param seed Random seed for reproducibility
+#'
+#' @return List containing neural topic model and diagnostics
+#' @concept topic-modeling
+#' @keywords internal
+#' @export
+run_neural_topics_internal <- function(texts, n_topics = 10, hidden_layers = 2,
+                                           hidden_units = 100, dropout_rate = 0.2,
+                                           embedding_model = "all-MiniLM-L6-v2", seed = 123) {
+
+  tryCatch({
+    base_result <- fit_embedding_model(
+      texts = texts,
+      method = "embedding_clustering",
+      n_topics = n_topics,
+      embedding_model = embedding_model,
+      seed = seed
+    )
+
+    coherence <- calculate_coherence(base_result$embeddings, base_result$topic_assignments)
+
+    diagnostics <- list(
+      architecture = list(
+        hidden_layers = hidden_layers,
+        hidden_units = hidden_units,
+        dropout_rate = dropout_rate
+      ),
+      topic_quality = list(
+        neural_coherence = coherence$coherence_scores,
+        mean_coherence = coherence$mean_coherence
+      )
+    )
+
+    result <- base_result
+    result$method <- "neural_topic_model"
+    result$diagnostics <- diagnostics
+    result$architecture <- list(hidden_layers = hidden_layers,
+                                hidden_units = hidden_units,
+                                dropout_rate = dropout_rate)
+
+    return(result)
+
+  }, error = function(e) {
+    warning("Neural topic modeling failed, falling back to base method: ", e$message)
+    return(fit_embedding_model(texts = texts, method = "embedding_clustering",
+                                   n_topics = n_topics,
+                                 embedding_model = embedding_model, seed = seed))
+  })
+}
+
+#' @title Fit Embedding-based Topic Model
+#'
+#' @description
+#' This function performs embedding-based topic modeling using transformer embeddings
+#' and specialized clustering techniques. Supports two backends:
+#'
+#' - **Python backend** (default): Uses BERTopic library which combines transformer
+#'   embeddings with UMAP dimensionality reduction and HDBSCAN clustering for optimal
+#'   topic discovery.
+#' - **R backend**: Uses R-native packages (umap, dbscan, Rtsne) for users without
+#'   Python/BERTopic installed. Provides similar functionality with c-TF-IDF keyword
+#'   extraction.
+#'
+#' @param texts A character vector of texts to analyze.
+#' @param method The topic modeling method:
+#'   - For Python backend: "umap_hdbscan" (uses BERTopic)
+#'   - For R backend: "umap_dbscan", "umap_kmeans", "umap_hierarchical",
+#'     "tsne_dbscan", "tsne_kmeans", "pca_kmeans", "pca_hierarchical"
+#'   - For both: "embedding_clustering", "hierarchical_semantic"
+#' @param n_topics The number of topics to identify. For UMAP+HDBSCAN, use NULL or "auto" for automatic determination, or specify an integer.
+#' @param embedding_model The embedding model to use (default: "all-MiniLM-L6-v2").
+#' @param backend The backend to use: "auto" (default, tries Python then R),
+#'   "python" (requires BERTopic), or "r" (R-native packages only).
+#' @param clustering_method The clustering method for embedding-based approach: "kmeans", "hierarchical", "dbscan", "hdbscan".
+#' @param similarity_threshold The similarity threshold for topic assignment (default: 0.7).
+#' @param min_topic_size The minimum number of documents per topic (default: 3).
+#' @param min_cluster_size HDBSCAN density threshold (default `NULL` falls back to `min_topic_size`). Setting this independently lets fine-grained clusters merge into broader topics.
+#' @param cluster_selection_method HDBSCAN cluster selection method: "eom" (Excess of Mass, default) or "leaf" (finer-grained topics).
+#' @param umap_neighbors The number of neighbors for UMAP dimensionality reduction (default: 15).
+#' @param umap_min_dist The minimum distance for UMAP (default: 0.0). Use 0.0 for tight, well-separated clusters. Use 0.1+ for visualization purposes. Range: 0.0-0.99.
+#' @param umap_n_components The number of UMAP components (default: 5).
+#' @param umap_metric Distance metric for UMAP: "cosine" (recommended for text) or "euclidean" (default: "cosine").
+#' @param tsne_perplexity Perplexity parameter for t-SNE (default: 30). Only used when method includes "tsne"; t-SNE output is 2-dimensional.
+#' @param pca_dims Number of PCA components kept for clustering (default: 50). Only used when method includes "pca".
+#' @param dbscan_eps Epsilon parameter for DBSCAN (default: 0.5). Neighborhood size for density-based clustering.
+#' @param dbscan_minpts Minimum points for DBSCAN core points (default: 5).
+#' @param representation_method The method for topic representation: "c-tfidf", "tfidf", "mmr", "frequency" (default: "c-tfidf").
+#'   Applies only to the R fallback backend and the "embedding_clustering",
+#'   "semantic_lda", and "hierarchical_semantic" methods; the Python BERTopic
+#'   backend ("umap_hdbscan") uses BERTopic's native c-TF-IDF representation.
+#' @param diversity Diversity weight between 0 and 1 for the "mmr"
+#'   representation (default: 0.5). Higher values penalize redundant terms
+#'   more strongly. Applies to the R backend; ignored by the Python BERTopic
+#'   backend.
+#' @param reduce_outliers Logical, if TRUE, reduces outliers in HDBSCAN clustering (default: TRUE).
+#' @param outlier_strategy Strategy for outlier reduction using BERTopic:
+#'   "probabilities" (default, uses topic probabilities), "c-tf-idf" (uses
+#'   c-TF-IDF similarity), "embeddings" (uses cosine similarity in embedding
+#'   space), or "distributions" (uses topic distributions). Ignored if
+#'   reduce_outliers = FALSE.
+#' @param outlier_threshold Minimum threshold for outlier reassignment (default: 0.0).
+#'   Higher values require stronger evidence for reassignment.
+#' @param seed Random seed for reproducibility (default: 123).
+#' @param verbose Logical, if TRUE, prints progress messages.
+#' @param precomputed_embeddings Optional matrix of pre-computed document embeddings.
+#'   If provided, skips embedding generation for improved performance. Must have
+#'   the same number of rows as the length of texts.
+#'
+#' @return A list containing topic assignments, topic keywords, and quality metrics.
+#'
+#' @concept topic-modeling
+#' @seealso [get_best_embeddings()] to supply precomputed embeddings; [generate_topic_labels()] for AI-suggested topic names; [find_optimal_k()] for an STM-based alternative
+#' @export
+#'
+#' @examples
+#' if (interactive()) {
+#'   mydata <- TextAnalysisR::SpecialEduTech
+#'   united_tbl <- TextAnalysisR::unite_cols(
+#'     mydata,
+#'     listed_vars = c("title", "keyword", "abstract")
+#'   )
+#'   texts <- united_tbl$united_texts
+#'
+#'   # Embedding-based topic modeling (powered by BERTopic)
+#'   result <- TextAnalysisR::fit_embedding_model(
+#'     texts = texts,
+#'     method = "umap_hdbscan",
+#'     n_topics = 8,
+#'     min_topic_size = 3
+#'   )
+#'
+#'   print(result$topic_assignments)
+#'   print(result$topic_keywords)
+#' }
+fit_embedding_model <- function(texts,
+                                   method = "umap_hdbscan",
+                                   n_topics = 10,
+                                   embedding_model = "all-MiniLM-L6-v2",
+                                   backend = "auto",
+                                   clustering_method = "kmeans",
+                                   similarity_threshold = 0.7,
+                                   min_topic_size = 10,
+                                   min_cluster_size = NULL,
+                                   cluster_selection_method = "eom",
+                                   umap_neighbors = 15,
+                                   umap_min_dist = 0.0,
+                                   umap_n_components = 5,
+                                   umap_metric = "cosine",
+                                   tsne_perplexity = 30,
+                                   pca_dims = 50,
+                                   dbscan_eps = 0.5,
+                                   dbscan_minpts = 5,
+                                   representation_method = "c-tfidf",
+                                   diversity = 0.5,
+                                   reduce_outliers = TRUE,
+                                   outlier_strategy = "probabilities",
+                                   outlier_threshold = 0.0,
+                                   seed = 123,
+                                   verbose = TRUE,
+                                   precomputed_embeddings = NULL) {
+
+  if (is.null(texts) || length(texts) == 0) {
+    stop("No texts provided for analysis")
+  }
+
+  backend <- match.arg(backend, c("auto", "python", "r"))
+
+  if (backend == "auto") {
+    python_available <- tryCatch({
+      requireNamespace("reticulate", quietly = TRUE) &&
+        reticulate::py_module_available("bertopic")
+    }, error = function(e) FALSE)
+
+    backend <- if (python_available) "python" else "r"
+    if (verbose) {
+      message("Auto-detected backend: ", backend)
+    }
+  }
+
+  if (backend == "r") {
+    return(.fit_embedding_model_r(
+      texts = texts,
+      method = method,
+      n_topics = n_topics,
+      embedding_model = embedding_model,
+      umap_neighbors = umap_neighbors,
+      umap_min_dist = umap_min_dist,
+      umap_n_components = umap_n_components,
+      umap_metric = umap_metric,
+      tsne_perplexity = tsne_perplexity,
+      pca_dims = pca_dims,
+      dbscan_eps = dbscan_eps,
+      dbscan_minpts = dbscan_minpts,
+      min_topic_size = min_topic_size,
+      representation_method = representation_method,
+      diversity = diversity,
+      reduce_outliers = reduce_outliers,
+      seed = seed,
+      verbose = verbose,
+      precomputed_embeddings = precomputed_embeddings
+    ))
+  }
+
+  if (verbose) {
+    message("Starting semantic-based topic modeling...")
+    message("Method: ", method)
+    message("Number of topics: ", n_topics)
+    message("Backend: Python (BERTopic)")
+  }
+
+  valid_texts <- texts[nchar(trimws(texts)) > 0]
+  if (length(valid_texts) < min_topic_size) {
+    stop("Need at least ", min_topic_size, " non-empty texts for analysis")
+  }
+
+  withr::local_seed(seed)
+  start_time <- Sys.time()
+
+  tryCatch({
+    if (!is.null(precomputed_embeddings)) {
+      if (verbose) message("Step 1: Using precomputed embeddings...")
+      if (!is.matrix(precomputed_embeddings)) {
+        precomputed_embeddings <- as.matrix(precomputed_embeddings)
+      }
+      if (nrow(precomputed_embeddings) != length(valid_texts)) {
+        stop("Precomputed embeddings dimension mismatch: ",
+             nrow(precomputed_embeddings), " embeddings vs ",
+             length(valid_texts), " texts")
+      }
+      embeddings <- precomputed_embeddings
+    } else {
+      if (verbose) message("Step 1: Generating document embeddings...")
+
+      if (!requireNamespace("reticulate", quietly = TRUE)) {
+        return(.notify_missing_python("Semantic topic modeling"))
+      }
+
+      python_available <- tryCatch({
+        reticulate::py_config()
+        TRUE
+      }, error = function(e) FALSE)
+
+      if (!python_available) {
+        return(.notify_missing_python("Semantic topic modeling (sentence-transformers)"))
+      }
+      sentence_transformers <- reticulate::import("sentence_transformers")
+      model <- sentence_transformers$SentenceTransformer(embedding_model)
+
+      n_docs <- length(valid_texts)
+      batch_size <- if (n_docs > 100) 25 else if (n_docs > 50) 50 else n_docs
+
+      if (verbose) message("Processing ", n_docs, " documents with embeddings...")
+
+      embeddings_list <- list()
+      for (i in seq(1, n_docs, by = batch_size)) {
+        end_idx <- min(i + batch_size - 1, n_docs)
+        batch_texts <- valid_texts[i:end_idx]
+        batch_embeddings <- model$encode(batch_texts, show_progress_bar = FALSE, normalize_embeddings = TRUE)
+        embeddings_list[[length(embeddings_list) + 1]] <- batch_embeddings
+      }
+
+      embeddings <- do.call(rbind, embeddings_list)
+    }
+
+
+    result <- switch(method,
+      "umap_hdbscan" = {
+        if (verbose) message("Step 2: Performing BERTopic-based topic modeling...")
+
+        bertopic_available <- tryCatch({
+          reticulate::import("bertopic")
+          TRUE
+        }, error = function(e) FALSE)
+
+        if (!bertopic_available) {
+          stop("BERTopic library not found. Please install: pip install bertopic\n",
+               "Or in R: reticulate::py_install('bertopic')")
+        }
+
+        bertopic <- reticulate::import("bertopic")
+
+        # "auto" requests BERTopic's automatic topic merging
+        nr_topics <- if (is.null(n_topics)) NULL
+          else if (identical(n_topics, "auto")) "auto"
+          else as.integer(n_topics)
+
+        if (verbose) message("Initializing BERTopic model...")
+
+        topic_model <- bertopic$BERTopic(
+          embedding_model = embedding_model,
+          nr_topics = nr_topics,
+          min_topic_size = as.integer(min_topic_size),
+          umap_model = reticulate::import("umap")$UMAP(
+            n_neighbors = as.integer(umap_neighbors),
+            n_components = as.integer(umap_n_components),
+            min_dist = umap_min_dist,
+            metric = umap_metric,
+            random_state = as.integer(seed)
+          ),
+          hdbscan_model = reticulate::import("hdbscan")$HDBSCAN(
+            min_cluster_size = as.integer(min_cluster_size %||% min_topic_size),
+            cluster_selection_method = cluster_selection_method,
+            metric = "euclidean",
+            prediction_data = TRUE
+          ),
+          calculate_probabilities = TRUE,
+          verbose = verbose
+        )
+
+        if (verbose) message("Fitting BERTopic model to ", length(valid_texts), " documents...")
+
+        # cluster on the already computed embeddings
+        fit_result <- topic_model$fit_transform(valid_texts, embeddings = embeddings)
+        topic_assignments_raw <- fit_result[[1]]
+        topic_probs <- fit_result[[2]]
+
+        topic_assignments <- as.vector(topic_assignments_raw) + 1
+
+        outlier_docs <- which(topic_assignments == 0)
+        outliers_reassigned <- 0
+        outlier_strategy_used <- outlier_strategy
+        if (length(outlier_docs) > 0 && reduce_outliers) {
+          if (verbose) message("Reassigning ", length(outlier_docs), " outlier documents using '", outlier_strategy, "' strategy...")
+
+          if (outlier_strategy == "probabilities") {
+            for (idx in outlier_docs) {
+              if (!is.null(topic_probs) && nrow(topic_probs) >= idx) {
+                probs <- topic_probs[idx, ]
+                if (max(probs) > outlier_threshold) {
+                  topic_assignments[idx] <- which.max(probs)
+                  outliers_reassigned <- outliers_reassigned + 1
+                }
+              }
+            }
+          } else if (outlier_strategy %in% c("c-tf-idf", "embeddings", "distributions")) {
+            new_topics <- topic_model$reduce_outliers(
+              valid_texts,
+              as.integer(topic_assignments_raw),
+              strategy = outlier_strategy,
+              threshold = outlier_threshold
+            )
+            # sync topic info with the new assignments
+            topic_model$update_topics(valid_texts, topics = new_topics)
+            topic_assignments <- as.vector(new_topics) + 1
+            outliers_reassigned <- length(outlier_docs) - sum(topic_assignments == 0)
+          }
+        }
+
+        if (verbose) message("Extracting topic information...")
+        topic_info <- topic_model$get_topic_info()
+
+        topic_keywords_list <- list()
+        topic_keyword_scores_list <- list()
+        for (topic_id in unique(topic_assignments)) {
+          if (topic_id == 0) next
+
+          topic_words <- topic_model$get_topic(as.integer(topic_id - 1))
+
+          if (!is.null(topic_words) && length(topic_words) > 0 && is.list(topic_words)) {
+            keywords <- vapply(topic_words, function(x) as.character(x[[1]]), character(1))
+            scores <- vapply(topic_words, function(x) as.numeric(x[[2]]), numeric(1))
+          } else {
+            keywords <- character(0)
+            scores <- numeric(0)
+          }
+
+          topic_keywords_list[[as.character(topic_id)]] <- keywords
+          topic_keyword_scores_list[[as.character(topic_id)]] <- scores
+        }
+
+        embeddings_matrix <- embeddings
+
+        reduced_embeddings_obj <- topic_model$umap_model$embedding_
+        reduced_embeddings <- as.matrix(reduced_embeddings_obj)
+
+        list(
+          topic_assignments = topic_assignments,
+          topic_keywords = topic_keywords_list,
+          topic_keyword_scores = topic_keyword_scores_list,
+          embeddings = embeddings_matrix,
+          reduced_embeddings = reduced_embeddings,
+          bertopic_model = topic_model,
+          topic_info = topic_info,
+          probabilities = topic_probs,
+          method = "umap_hdbscan",
+          outlier_reduction = list(
+            enabled = reduce_outliers,
+            strategy = if (reduce_outliers) outlier_strategy_used else NA_character_,
+            threshold = if (reduce_outliers) outlier_threshold else NA_real_,
+            outliers_found = length(outlier_docs),
+            outliers_reassigned = outliers_reassigned
+          )
+        )
+      },
+      "embedding_clustering" = {
+        if (verbose) message("Step 2: Performing embedding-based clustering...")
+
+        sklearn_metrics <- reticulate::import("sklearn.metrics.pairwise")
+        similarity_matrix <- sklearn_metrics$cosine_similarity(embeddings)
+        similarity_matrix <- as.matrix(similarity_matrix)
+
+        clustering_result <- cluster_embeddings(
+          data_matrix = similarity_matrix,
+          method = clustering_method,
+          n_clusters = n_topics,
+          seed = seed,
+          verbose = verbose
+        )
+
+
+        topic_assignments <- clustering_result$clusters
+
+        topic_keywords <- generate_semantic_topic_keywords(
+          texts = valid_texts,
+          topic_assignments = topic_assignments,
+          n_keywords = 10,
+          method = representation_method,
+          diversity = diversity
+        )
+
+        list(
+          topic_assignments = topic_assignments,
+          topic_keywords = topic_keywords,
+          similarity_matrix = similarity_matrix,
+          embeddings = embeddings,
+          clustering_result = clustering_result,
+          method = "embedding_clustering"
+        )
+      },
+      "semantic_lda" = {
+        if (verbose) message("Step 2: Performing semantic LDA...")
+
+        pca_result <- stats::prcomp(embeddings, center = TRUE, scale. = FALSE, rank. = min(50, ncol(embeddings)))
+        reduced_embeddings <- pca_result$x
+
+        kmeans_result <- stats::kmeans(reduced_embeddings, centers = n_topics, nstart = 25)
+        topic_assignments <- kmeans_result$cluster
+
+        topic_keywords <- generate_semantic_topic_keywords(
+          texts = valid_texts,
+          topic_assignments = topic_assignments,
+          n_keywords = 10,
+          method = representation_method,
+          diversity = diversity
+        )
+
+        list(
+          topic_assignments = topic_assignments,
+          topic_keywords = topic_keywords,
+          embeddings = embeddings,
+          reduced_embeddings = reduced_embeddings,
+          kmeans_result = kmeans_result,
+          method = "semantic_lda"
+        )
+      },
+      "hierarchical_semantic" = {
+        if (verbose) message("Step 2: Performing hierarchical semantic clustering...")
+
+        dist_matrix <- stats::dist(embeddings, method = "euclidean")
+
+        hclust_result <- stats::hclust(dist_matrix, method = "ward.D2")
+
+        topic_assignments <- stats::cutree(hclust_result, k = n_topics)
+
+        topic_keywords <- generate_semantic_topic_keywords(
+          texts = valid_texts,
+          topic_assignments = topic_assignments,
+          n_keywords = 10,
+          method = representation_method,
+          diversity = diversity
+        )
+
+        list(
+          topic_assignments = topic_assignments,
+          topic_keywords = topic_keywords,
+          embeddings = embeddings,
+          hclust_result = hclust_result,
+          method = "hierarchical_semantic"
+        )
+      },
+      stop("Unsupported semantic topic modeling method: ", method)
+    )
+
+    if (verbose) message("Step 3: Calculating quality metrics...")
+
+    quality_metrics <- calculate_topic_quality(
+      embeddings = embeddings,
+      topic_assignments = result$topic_assignments,
+      similarity_matrix = result$similarity_matrix
+    )
+
+    execution_time <- as.numeric(difftime(Sys.time(), start_time, units = "secs"))
+
+    if (verbose) {
+      message("Semantic topic modeling completed in ", round(execution_time, 2), " seconds")
+      message("Topics identified: ", length(unique(result$topic_assignments)))
+    }
+
+    final_result <- c(result, list(
+      quality_metrics = quality_metrics,
+      execution_time = execution_time,
+      n_documents = length(valid_texts),
+      n_topics = length(unique(result$topic_assignments)),
+      embedding_model = embedding_model,
+      timestamp = Sys.time()
+    ))
+
+    return(final_result)
+
+  }, error = function(e) {
+    stop("Error in semantic topic modeling: ", e$message)
+  })
+}
+
+
+.fit_embedding_model_r <- function(texts,
+                                   method = "umap_dbscan",
+                                   n_topics = 10,
+                                   embedding_model = "all-MiniLM-L6-v2",
+                                   umap_neighbors = 15,
+                                   umap_min_dist = 0.0,
+                                   umap_n_components = 5,
+                                   umap_metric = "cosine",
+                                   tsne_perplexity = 30,
+                                   pca_dims = 50,
+                                   dbscan_eps = 0.5,
+                                   dbscan_minpts = 5,
+                                   min_topic_size = 10,
+                                   representation_method = "c-tfidf",
+                                   diversity = 0.5,
+                                   reduce_outliers = TRUE,
+                                   seed = 123,
+                                   verbose = TRUE,
+                                   precomputed_embeddings = NULL) {
+
+  if (verbose) {
+    message("Starting R-native embedding-based topic modeling...")
+    message("Method: ", method)
+    message("Number of topics: ", n_topics)
+    message("Backend: R (no Python required)")
+  }
+
+  valid_texts <- texts[nchar(trimws(texts)) > 0]
+  if (length(valid_texts) < min_topic_size) {
+    stop("Need at least ", min_topic_size, " non-empty texts for analysis")
+  }
+
+  withr::local_seed(seed)
+  start_time <- Sys.time()
+
+  tryCatch({
+    if (!is.null(precomputed_embeddings)) {
+      if (verbose) message("Step 1: Using precomputed embeddings...")
+      if (!is.matrix(precomputed_embeddings)) {
+        precomputed_embeddings <- as.matrix(precomputed_embeddings)
+      }
+      if (nrow(precomputed_embeddings) != length(valid_texts)) {
+        stop("Precomputed embeddings dimension mismatch: ",
+             nrow(precomputed_embeddings), " embeddings vs ",
+             length(valid_texts), " texts")
+      }
+      embeddings <- precomputed_embeddings
+    } else {
+      if (verbose) message("Step 1: Generating document embeddings...")
+
+      if (!requireNamespace("reticulate", quietly = TRUE)) {
+        return(.notify_missing_python("Embedding generation"))
+      }
+
+      python_available <- tryCatch({
+        reticulate::py_config()
+        TRUE
+      }, error = function(e) FALSE)
+
+      if (!python_available) {
+        return(.notify_missing_python("Embedding generation (sentence-transformers)"))
+      }
+      sentence_transformers <- reticulate::import("sentence_transformers")
+      model <- sentence_transformers$SentenceTransformer(embedding_model)
+
+      n_docs <- length(valid_texts)
+      batch_size <- if (n_docs > 100) 25 else if (n_docs > 50) 50 else n_docs
+
+      if (verbose) message("Processing ", n_docs, " documents with embeddings...")
+
+      embeddings_list <- list()
+      for (i in seq(1, n_docs, by = batch_size)) {
+        end_idx <- min(i + batch_size - 1, n_docs)
+        batch_texts <- valid_texts[i:end_idx]
+        batch_embeddings <- model$encode(batch_texts, show_progress_bar = FALSE, normalize_embeddings = TRUE)
+        embeddings_list[[length(embeddings_list) + 1]] <- batch_embeddings
+      }
+
+      embeddings <- do.call(rbind, embeddings_list)
+    }
+
+    dimred_method <- gsub("_.*", "", method)
+    cluster_method <- gsub(".*_", "", method)
+
+    if (verbose) message("Step 2: Applying dimensionality reduction (", toupper(dimred_method), ")...")
+
+    reduced_embeddings <- switch(dimred_method,
+      "umap" = {
+        if (!requireNamespace("umap", quietly = TRUE)) {
+          stop("umap package required. Install with: install.packages('umap')")
+        }
+        umap_config <- umap::umap.defaults
+        umap_config$n_neighbors <- umap_neighbors
+        umap_config$min_dist <- max(umap_min_dist, 0.001)
+        umap_config$n_components <- min(umap_n_components, ncol(embeddings))
+        umap_config$metric <- umap_metric
+        umap_result <- umap::umap(embeddings, config = umap_config)
+        umap_result$layout
+      },
+      "tsne" = {
+        if (!requireNamespace("Rtsne", quietly = TRUE)) {
+          stop("Rtsne package required. Install with: install.packages('Rtsne')")
+        }
+        tsne_result <- Rtsne::Rtsne(embeddings,
+                                    dims = 2,
+                                    perplexity = min(tsne_perplexity, floor((nrow(embeddings) - 1) / 3)),
+                                    check_duplicates = FALSE)
+        tsne_result$Y
+      },
+      "pca" = {
+        pca_result <- stats::prcomp(embeddings, center = TRUE, scale. = FALSE,
+                                    rank. = min(pca_dims, ncol(embeddings)))
+        pca_result$x[, seq_len(min(pca_dims, ncol(pca_result$x))), drop = FALSE]
+      },
+      {
+        if (!requireNamespace("umap", quietly = TRUE)) {
+          stop("umap package required. Install with: install.packages('umap')")
+        }
+        umap_config <- umap::umap.defaults
+        umap_config$n_neighbors <- umap_neighbors
+        umap_config$min_dist <- max(umap_min_dist, 0.001)
+        umap_config$n_components <- min(umap_n_components, ncol(embeddings))
+        umap_config$metric <- umap_metric
+        umap_result <- umap::umap(embeddings, config = umap_config)
+        umap_result$layout
+      }
+    )
+
+    if (verbose) message("Step 3: Clustering documents (", cluster_method, ")...")
+
+    clusters <- switch(cluster_method,
+      "dbscan" = {
+        if (!requireNamespace("dbscan", quietly = TRUE)) {
+          stop("dbscan package required. Install with: install.packages('dbscan')")
+        }
+        db_result <- dbscan::dbscan(reduced_embeddings, eps = dbscan_eps, minPts = dbscan_minpts)
+        clusters <- db_result$cluster
+
+        if (reduce_outliers && any(clusters == 0) && length(unique(clusters[clusters > 0])) > 0) {
+          if (verbose) message("Reassigning ", sum(clusters == 0), " outlier documents...")
+          noise_idx <- which(clusters == 0)
+          valid_clusters <- unique(clusters[clusters > 0])
+
+          centroids <- sapply(valid_clusters, function(cl) {
+            colMeans(reduced_embeddings[clusters == cl, , drop = FALSE])
+          })
+          if (is.vector(centroids)) centroids <- matrix(centroids, nrow = 1)
+          centroids <- t(centroids)
+
+          for (idx in noise_idx) {
+            point <- reduced_embeddings[idx, ]
+            distances <- apply(centroids, 1, function(c) sqrt(sum((point - c)^2)))
+            clusters[idx] <- valid_clusters[which.min(distances)]
+          }
+        }
+        clusters
+      },
+      "kmeans" = {
+        k <- if (is.null(n_topics) || n_topics == "auto") {
+          min(10, nrow(reduced_embeddings) - 1)
+        } else {
+          as.integer(n_topics)
+        }
+        km_result <- stats::kmeans(reduced_embeddings, centers = k, nstart = 25)
+        km_result$cluster
+      },
+      "hierarchical" = {
+        k <- if (is.null(n_topics) || n_topics == "auto") {
+          min(10, nrow(reduced_embeddings) - 1)
+        } else {
+          as.integer(n_topics)
+        }
+        dist_matrix <- stats::dist(reduced_embeddings)
+        hc_result <- stats::hclust(dist_matrix, method = "ward.D2")
+        stats::cutree(hc_result, k = k)
+      },
+      "hdbscan" = {
+        if (!requireNamespace("dbscan", quietly = TRUE)) {
+          stop("dbscan package required. Install with: install.packages('dbscan')")
+        }
+        hdb_result <- dbscan::hdbscan(reduced_embeddings, minPts = min_topic_size)
+        clusters <- hdb_result$cluster
+
+        if (reduce_outliers && any(clusters == 0) && length(unique(clusters[clusters > 0])) > 0) {
+          if (verbose) message("Reassigning ", sum(clusters == 0), " outlier documents...")
+          noise_idx <- which(clusters == 0)
+          valid_clusters <- unique(clusters[clusters > 0])
+
+          centroids <- sapply(valid_clusters, function(cl) {
+            colMeans(reduced_embeddings[clusters == cl, , drop = FALSE])
+          })
+          if (is.vector(centroids)) centroids <- matrix(centroids, nrow = 1)
+          centroids <- t(centroids)
+
+          for (idx in noise_idx) {
+            point <- reduced_embeddings[idx, ]
+            distances <- apply(centroids, 1, function(c) sqrt(sum((point - c)^2)))
+            clusters[idx] <- valid_clusters[which.min(distances)]
+          }
+        }
+        clusters
+      },
+      {
+        if (!requireNamespace("dbscan", quietly = TRUE)) {
+          stop("dbscan package required. Install with: install.packages('dbscan')")
+        }
+        db_result <- dbscan::dbscan(reduced_embeddings, eps = dbscan_eps, minPts = dbscan_minpts)
+        db_result$cluster
+      }
+    )
+
+    if (verbose) message("Step 4: Generating topic keywords via ", representation_method, "...")
+    topic_keywords <- generate_semantic_topic_keywords(
+      texts = valid_texts,
+      topic_assignments = clusters,
+      n_keywords = 10,
+      method = representation_method,
+      diversity = diversity
+    )
+
+    if (verbose) message("Step 5: Calculating quality metrics...")
+    quality_metrics <- tryCatch({
+      calculate_topic_quality(
+        embeddings = embeddings,
+        topic_assignments = clusters,
+        similarity_matrix = NULL
+      )
+    }, error = function(e) list(overall_quality = NA))
+
+    execution_time <- as.numeric(difftime(Sys.time(), start_time, units = "secs"))
+
+    if (verbose) {
+      message("R-native topic modeling completed in ", round(execution_time, 2), " seconds")
+      message("Topics identified: ", length(unique(clusters[clusters > 0])))
+    }
+
+    list(
+      topic_assignments = clusters,
+      topic_keywords = topic_keywords,
+      embeddings = embeddings,
+      reduced_embeddings = reduced_embeddings,
+      method = method,
+      backend = "r",
+      dimred_method = dimred_method,
+      cluster_method = cluster_method,
+      quality_metrics = quality_metrics,
+      execution_time = execution_time,
+      n_documents = length(valid_texts),
+      n_topics = length(unique(clusters[clusters > 0])),
+      embedding_model = embedding_model,
+      timestamp = Sys.time()
+    )
+
+  }, error = function(e) {
+    stop("Error in R-native topic modeling: ", e$message)
+  })
+}
+
+
+#' @title Embedding-based Topic Modeling (Deprecated)
+#' @description
+#' This function is deprecated. Please use [fit_embedding_model()] instead.
+#' @inheritParams fit_embedding_model
+#' @return A list containing topic assignments, topic keywords, and quality metrics.
+#' @keywords internal
+#' @export
+fit_embedding_topics <- function(texts,
+                                   method = "umap_hdbscan",
+                                   n_topics = 10,
+                                   embedding_model = "all-MiniLM-L6-v2",
+                                   clustering_method = "kmeans",
+                                   similarity_threshold = 0.7,
+                                   min_topic_size = 10,
+                                   cluster_selection_method = "eom",
+                                   umap_neighbors = 15,
+                                   umap_min_dist = 0.0,
+                                   umap_n_components = 5,
+                                   representation_method = "c-tfidf",
+                                   diversity = 0.5,
+                                   reduce_outliers = TRUE,
+                                   outlier_strategy = "probabilities",
+                                   outlier_threshold = 0.0,
+                                   seed = 123,
+                                   verbose = TRUE,
+                                   precomputed_embeddings = NULL) {
+  .Deprecated("fit_embedding_model")
+  fit_embedding_model(
+    texts = texts,
+    method = method,
+    n_topics = n_topics,
+    embedding_model = embedding_model,
+    clustering_method = clustering_method,
+    similarity_threshold = similarity_threshold,
+    min_topic_size = min_topic_size,
+    cluster_selection_method = cluster_selection_method,
+    umap_neighbors = umap_neighbors,
+    umap_min_dist = umap_min_dist,
+    umap_n_components = umap_n_components,
+    representation_method = representation_method,
+    diversity = diversity,
+    reduce_outliers = reduce_outliers,
+    outlier_strategy = outlier_strategy,
+    outlier_threshold = outlier_threshold,
+    seed = seed,
+    verbose = verbose,
+    precomputed_embeddings = precomputed_embeddings
+  )
+}
+
+#' @title Find Similar Topics
+#'
+#' @description
+#' This function finds the most similar topics to a given query using semantic similarity analysis.
+#' It works with both semantic topic models and traditional STM models by creating topic representations
+#' using transformer embeddings and calculating cosine similarity scores.
+#'
+#' @param topic_model A topic model object (semantic topic model or STM model).
+#' @param query A character string representing the query topic.
+#' @param top_n The number of similar topics to return (default: 10).
+#' @param method The similarity method: "cosine", "euclidean", "embedding".
+#' @param embedding_model The embedding model to use for query encoding (default: "all-MiniLM-L6-v2").
+#' @param include_terms Logical, whether to include topic terms in the similarity calculation (default: TRUE).
+#'
+#' @return A list containing similar topics and their similarity scores.
+#'
+#' @concept topic-modeling
+#' @export
+#'
+#' @examples
+#' if (interactive()) {
+#'   mydata <- TextAnalysisR::SpecialEduTech
+#'   united_tbl <- TextAnalysisR::unite_cols(
+#'     mydata,
+#'     listed_vars = c("title", "keyword", "abstract")
+#'   )
+#'   texts <- united_tbl$united_texts
+#'
+#'   topic_model <- TextAnalysisR::fit_embedding_model(
+#'     texts = texts,
+#'     method = "umap_hdbscan",
+#'     n_topics = 8
+#'   )
+#'
+#'   similar_topics <- TextAnalysisR::find_topic_matches(
+#'     topic_model = topic_model,
+#'     query = "mathematical learning",
+#'     top_n = 5
+#'   )
+#'
+#'   print(similar_topics)
+#' }
+find_topic_matches <- function(topic_model,
+                               query,
+                               top_n = 10,
+                               method = "cosine",
+                               embedding_model = "all-MiniLM-L6-v2",
+                               include_terms = TRUE) {
+
+  if (is.null(query) || nchar(trimws(query)) == 0) {
+    stop("Query cannot be empty")
+  }
+
+  tryCatch({
+    if (!requireNamespace("reticulate", quietly = TRUE)) {
+      stop("reticulate package is required for topic similarity")
+    }
+    sentence_transformers <- reticulate::import("sentence_transformers")
+    model <- sentence_transformers$SentenceTransformer(embedding_model)
+    query_embedding <- model$encode(query, show_progress_bar = FALSE, normalize_embeddings = TRUE)
+
+    if ("beta" %in% names(topic_model) || "theta" %in% names(topic_model)) {
+      message("Using STM model...")
+
+      beta_td <- tidytext::tidy(topic_model, matrix = "beta")
+      top_terms_by_topic <- beta_td %>%
+        dplyr::group_by(topic) %>%
+        dplyr::slice_max(order_by = beta, n = 10) %>%
+        dplyr::ungroup()
+
+      unique_topics <- unique(top_terms_by_topic$topic)
+      topic_representations <- list()
+
+      for (topic in unique_topics) {
+        topic_terms <- top_terms_by_topic %>%
+          dplyr::filter(topic == !!topic) %>%
+          dplyr::pull(term)
+
+        topic_text <- paste(topic_terms, collapse = " ")
+        topic_embedding <- model$encode(topic_text, show_progress_bar = FALSE, normalize_embeddings = TRUE)
+        topic_representations[[as.character(topic)]] <- topic_embedding
+      }
+
+      sklearn_metrics <- reticulate::import("sklearn.metrics.pairwise")
+      similarities <- numeric(length(unique_topics))
+
+      for (i in seq_along(unique_topics)) {
+        topic <- unique_topics[i]
+        topic_embedding <- topic_representations[[as.character(topic)]]
+        similarity <- sklearn_metrics$cosine_similarity(
+          matrix(query_embedding, nrow = 1),
+          matrix(topic_embedding, nrow = 1)
+        )[1, 1]
+        similarities[i] <- similarity
+      }
+
+      topic_terms <- NULL
+      if (include_terms) {
+        topic_terms <- top_terms_by_topic %>%
+          dplyr::group_by(topic) %>%
+          dplyr::slice_max(order_by = beta, n = 5) %>%
+          dplyr::ungroup() %>%
+          dplyr::group_by(topic) %>%
+          dplyr::summarise(top_terms = paste(term, collapse = ", "), .groups = "drop")
+      }
+
+    } else if ("embeddings" %in% names(topic_model) && "topic_assignments" %in% names(topic_model)) {
+      message("Using semantic topic model...")
+
+      unique_topics <- unique(topic_model$topic_assignments)
+      topic_centroids <- matrix(0, nrow = length(unique_topics), ncol = ncol(topic_model$embeddings))
+
+      for (i in seq_along(unique_topics)) {
+        topic <- unique_topics[i]
+        topic_docs <- which(topic_model$topic_assignments == topic)
+        topic_centroids[i, ] <- colMeans(topic_model$embeddings[topic_docs, , drop = FALSE])
+      }
+
+      sklearn_metrics <- reticulate::import("sklearn.metrics.pairwise")
+      similarities <- sklearn_metrics$cosine_similarity(
+        matrix(query_embedding, nrow = 1),
+        topic_centroids
+      )[1, ]
+
+      topic_terms <- NULL
+      if (include_terms && "topic_keywords" %in% names(topic_model)) {
+        topic_terms <- data.frame(
+          topic = names(topic_model$topic_keywords),
+          top_terms = sapply(topic_model$topic_keywords, function(x) {
+            if (length(x) > 0) paste(head(x, 5), collapse = ", ") else "No terms"
+          }),
+          stringsAsFactors = FALSE
+        )
+      }
+
+    } else {
+      stop("Unsupported topic model type. Expected STM model (with 'beta'/'theta') or semantic model (with 'embeddings'/'topic_assignments')")
+    }
+
+    topic_similarities <- data.frame(
+      topic = unique_topics,
+      similarity = similarities,
+      stringsAsFactors = FALSE
+    )
+
+    topic_similarities <- topic_similarities[order(topic_similarities$similarity, decreasing = TRUE), ]
+
+    result <- list(
+      similar_topics = topic_similarities$topic[seq_len(min(top_n, nrow(topic_similarities)))],
+      similarity_scores = topic_similarities$similarity[seq_len(min(top_n, nrow(topic_similarities)))],
+      query = query,
+      method = method,
+      topic_terms = topic_terms
+    )
+
+    return(result)
+
+  }, error = function(e) {
+    stop("Error finding similar topics: ", e$message)
+  })
+}
+
+
+#' @title Calculate NPMI for Topic Top-Terms
+#'
+#' @description
+#' NPMI (Normalized Pointwise Mutual Information) measures coherence of top-K
+#' terms per topic using internal document co-occurrence from the supplied DFM
+#' (boolean presence).
+#'
+#' @param top_terms_list Named or unnamed list of character vectors, one per topic.
+#' @param dfm A quanteda dfm providing the reference doc-term frequencies.
+#' @param top_k Number of top terms per topic to include (default 10).
+#' @param epsilon Numerical stabilizer (default 1e-12).
+#' @return list with `mean_npmi` (scalar) and `per_topic_npmi` (numeric vector).
+#' @importFrom methods as
+#' @concept topic-modeling
+#' @keywords internal
+calculate_npmi <- function(top_terms_list, dfm, top_k = 10, epsilon = 1e-12) {
+  if (is.null(top_terms_list) || length(top_terms_list) == 0 || is.null(dfm)) {
+    return(list(mean_npmi = NA_real_, per_topic_npmi = numeric(0)))
+  }
+  dtm <- methods::as(dfm > 0, "CsparseMatrix")
+  n_docs <- nrow(dtm)
+  if (n_docs < 2) return(list(mean_npmi = NA_real_, per_topic_npmi = numeric(0)))
+  vocab <- colnames(dtm)
+
+  per_topic <- vapply(top_terms_list, function(terms) {
+    terms <- utils::head(as.character(terms), top_k)
+    terms <- terms[terms %in% vocab]
+    if (length(terms) < 2) return(NA_real_)
+    sub_dtm <- dtm[, terms, drop = FALSE]
+    doc_freq <- Matrix::colSums(sub_dtm)
+    pairs <- utils::combn(seq_along(terms), 2)
+    npmis <- vapply(seq_len(ncol(pairs)), function(k) {
+      i <- pairs[1, k]; j <- pairs[2, k]
+      p_i <- doc_freq[i] / n_docs
+      p_j <- doc_freq[j] / n_docs
+      co <- sum(sub_dtm[, i] * sub_dtm[, j])
+      p_ij <- co / n_docs
+      # NPMI lower bound: words that never co-occur score -1
+      if (p_ij < epsilon) return(-1)
+      pmi <- log(p_ij / (p_i * p_j + epsilon))
+      pmi / (-log(p_ij + epsilon))
+    }, numeric(1))
+    mean(npmis, na.rm = TRUE)
+  }, numeric(1))
+
+  list(mean_npmi = mean(per_topic, na.rm = TRUE), per_topic_npmi = per_topic)
+}
+
+#' Calculate Topic Diversity (Unique-Word Proportion)
+#'
+#' Diversity = unique top-K terms across all topics / (n_topics * top_k).
+#' Range 0 (all topics identical) to 1 (fully disjoint). Complementary to NPMI
+#' coherence: a good model scores high on both.
+#'
+#' @param top_terms_list Named or unnamed list of character vectors, one per topic.
+#' @param top_k Number of top terms per topic to include (default 25).
+#' @return Numeric between 0 and 1, or NA if input empty.
+#' @concept topic-modeling
+#' @keywords internal
+calculate_topic_diversity <- function(top_terms_list, top_k = 25) {
+  if (is.null(top_terms_list) || length(top_terms_list) == 0) return(NA_real_)
+  terms_per_topic <- lapply(top_terms_list, function(t) utils::head(as.character(t), top_k))
+  actual_total <- sum(lengths(terms_per_topic))
+  if (actual_total == 0) return(NA_real_)
+  length(unique(unlist(terms_per_topic))) / actual_total
+}
+
+
+#' @title Auto-tune BERTopic Hyperparameters
+#'
+#' @description
+#' Automatically searches for optimal hyperparameters for embedding-based topic modeling.
+#' Evaluates multiple configurations of UMAP and HDBSCAN parameters and returns the best
+#' model based on the specified metric. Embeddings are generated once and reused across
+#' all configurations for efficiency.
+#'
+#' @param texts Character vector of documents to analyze.
+#' @param embeddings Precomputed embeddings matrix (optional). If NULL, embeddings are generated.
+#' @param embedding_model Embedding model name (default: "all-MiniLM-L6-v2").
+#' @param n_trials Maximum number of configurations to try (default: 12).
+#' @param metric Optimization metric: "silhouette", "coherence", or "combined" (default: "silhouette").
+#' @param seed Random seed for reproducibility.
+#' @param verbose Logical, if TRUE, prints progress messages.
+#'
+#' @return A list containing:
+#'   - best_config: Data frame with the optimal hyperparameter configuration
+#'   - best_model: The topic model fitted with optimal parameters
+#'   - all_results: List of all evaluated configurations with metrics
+#'   - n_trials_completed: Number of configurations successfully evaluated
+#'
+#' @details
+#' The function searches over these parameters:
+#' - n_neighbors: UMAP neighborhood size (5, 10, 15, 25)
+#' - min_cluster_size: HDBSCAN minimum cluster size (3, 5, 10)
+#' - cluster_selection_method: "eom" (broader) or "leaf" (finer-grained)
+#'
+#' @concept topic-modeling
+#' @export
+#' @examples
+#' if (interactive()) {
+#'   texts <- c("Machine learning for image recognition",
+#'              "Deep learning neural networks",
+#'              "Natural language processing models",
+#'              "Computer vision applications")
+#'
+#'   tuning_result <- auto_tune_embedding_topics(
+#'     texts = texts,
+#'     n_trials = 6,
+#'     metric = "silhouette",
+#'     verbose = TRUE
+#'   )
+#'
+#'   # View best configuration
+#'   tuning_result$best_config
+#'
+#'   # Use the best model
+#'   best_model <- tuning_result$best_model
+#' }
+auto_tune_embedding_topics <- function(
+    texts,
+    embeddings = NULL,
+    embedding_model = "all-MiniLM-L6-v2",
+    n_trials = 12,
+    metric = "silhouette",
+    seed = 123,
+    verbose = TRUE
+) {
+
+  if (verbose) message("Starting hyperparameter auto-tuning for embedding topics...")
+
+  # Validate inputs
+  if (is.null(texts) || length(texts) == 0) {
+    stop("No texts provided for analysis")
+  }
+
+  valid_metrics <- c("silhouette", "coherence", "combined")
+  if (!metric %in% valid_metrics) {
+    stop("metric must be one of: ", paste(valid_metrics, collapse = ", "))
+  }
+
+  # Define parameter grid
+  param_grid <- expand.grid(
+    n_neighbors = c(5, 10, 15, 25),
+    min_cluster_size = c(3, 5, 10),
+    cluster_selection_method = c("eom", "leaf"),
+    stringsAsFactors = FALSE
+  )
+
+  # Sample configurations if grid is larger than n_trials
+  if (nrow(param_grid) > n_trials) {
+    withr::local_seed(seed)
+    sampled_rows <- sample(nrow(param_grid), n_trials)
+    param_grid <- param_grid[sampled_rows, ]
+  }
+
+  if (verbose) {
+    message("  Testing ", nrow(param_grid), " hyperparameter configurations")
+  }
+
+  # Generate embeddings once if not provided
+  if (is.null(embeddings)) {
+    if (verbose) message("  Generating embeddings (one-time cost)...")
+
+    embeddings <- tryCatch({
+      generate_embeddings(texts, model = embedding_model, verbose = FALSE)
+    }, error = function(e) {
+      stop("Failed to generate embeddings: ", e$message)
+    })
+
+    if (is.null(embeddings)) {
+      stop("Embedding generation unavailable. ",
+           "Run setup_python_env() or pass precomputed embeddings.",
+           call. = FALSE)
+    }
+  }
+
+  # Evaluate each configuration
+  results <- list()
+  successful <- 0
+
+  for (i in seq_len(nrow(param_grid))) {
+    config <- param_grid[i, ]
+
+    if (verbose) {
+      message("  [", i, "/", nrow(param_grid), "] Testing: ",
+              "n_neighbors=", config$n_neighbors,
+              ", min_cluster_size=", config$min_cluster_size,
+              ", method=", config$cluster_selection_method)
+    }
+
+    model_result <- tryCatch({
+      fit_embedding_model(
+        texts = texts,
+        method = "umap_hdbscan",
+        embedding_model = embedding_model,
+        precomputed_embeddings = embeddings,
+        umap_neighbors = config$n_neighbors,
+        min_topic_size = config$min_cluster_size,
+        cluster_selection_method = config$cluster_selection_method,
+        seed = seed,
+        verbose = FALSE
+      )
+    }, error = function(e) {
+      if (verbose) message("    Configuration failed: ", e$message)
+      NULL
+    })
+
+    if (!is.null(model_result)) {
+      silhouette_score <- .embedding_silhouette(model_result)
+      coherence_score <- model_result$quality_metrics$mean_topic_coherence %||% 0
+      combined_score <- mean(c(silhouette_score, coherence_score), na.rm = TRUE)
+
+      results[[length(results) + 1]] <- list(
+        config = config,
+        silhouette = silhouette_score,
+        coherence = coherence_score,
+        combined = combined_score,
+        n_topics = model_result$n_topics,
+        model = model_result
+      )
+
+      successful <- successful + 1
+
+      if (verbose) {
+        message("    -> Topics: ", model_result$n_topics,
+                ", Silhouette: ", round(silhouette_score, 3),
+                ", Coherence: ", round(coherence_score, 3))
+      }
+    }
+  }
+
+  if (successful == 0) {
+    stop("All configurations failed. Check your data and Python dependencies.")
+  }
+
+  # Select best configuration by metric
+  scores <- sapply(results, function(r) r[[metric]])
+  best_idx <- which.max(scores)
+
+  if (verbose) {
+    message("\nBest configuration (by ", metric, "):")
+    message("  n_neighbors: ", results[[best_idx]]$config$n_neighbors)
+    message("  min_cluster_size: ", results[[best_idx]]$config$min_cluster_size)
+    message("  cluster_selection_method: ", results[[best_idx]]$config$cluster_selection_method)
+    message("  ", metric, " score: ", round(results[[best_idx]][[metric]], 3))
+    message("  Number of topics: ", results[[best_idx]]$n_topics)
+  }
+
+  list(
+    best_config = results[[best_idx]]$config,
+    best_model = results[[best_idx]]$model,
+    all_results = results,
+    n_trials_completed = successful
+  )
+}
+
+
+#' @title Assess Embedding Topic Model Stability
+#'
+#' @description
+#' Evaluates the stability of embedding-based topic modeling by running multiple models
+#' with different random seeds and comparing their results. High stability (high ARI,
+#' consistent keywords) indicates stable topic structure in the data.
+#'
+#' @param texts Character vector of documents to analyze.
+#' @param n_runs Number of model runs with different seeds (default: 5).
+#'   More runs give a steadier stability estimate.
+#' @param embedding_model Embedding model name (default: "all-MiniLM-L6-v2").
+#' @param select_best Logical, if TRUE, returns the best model by quality (default: TRUE).
+#' @param base_seed Base random seed; each run uses base_seed + (run - 1).
+#' @param verbose Logical, if TRUE, prints progress messages.
+#' @param ... Additional arguments passed to fit_embedding_model().
+#'
+#' @return A list containing:
+#'   - stability_metrics: List with mean_ari, sd_ari, mean_jaccard, quality_variance
+#'   - best_model: Best model by silhouette score (if select_best = TRUE)
+#'   - all_models: List of all fitted models
+#'   - is_stable: Logical, TRUE if mean ARI >= 0.6 (considered stable)
+#'   - recommendation: Text recommendation based on stability
+#'
+#' @details
+#' Stability is assessed via:
+#' - Adjusted Rand Index (ARI): Measures agreement in topic assignments across runs
+#' - Keyword Jaccard similarity: Measures overlap in top keywords per topic
+#' - Quality variance: Variance in silhouette scores across runs
+#'
+#' @concept topic-modeling
+#' @export
+#' @examples
+#' if (interactive()) {
+#'   texts <- c("Machine learning for image recognition",
+#'              "Deep learning neural networks",
+#'              "Natural language processing models")
+#'
+#'   stability <- assess_embedding_stability(
+#'     texts = texts,
+#'     n_runs = 3,
+#'     verbose = TRUE
+#'   )
+#'
+#'   # Check if results are stable
+#'   stability$is_stable
+#'   stability$stability_metrics$mean_ari
+#'
+#'   # Use the best model
+#'   best_model <- stability$best_model
+#' }
+assess_embedding_stability <- function(
+    texts,
+    n_runs = 5,
+    embedding_model = "all-MiniLM-L6-v2",
+    select_best = TRUE,
+    base_seed = 123,
+    verbose = TRUE,
+    ...
+) {
+
+  if (verbose) message("Assessing embedding topic model stability across ", n_runs, " runs...")
+
+  # Validate inputs
+  if (is.null(texts) || length(texts) == 0) {
+    stop("No texts provided for analysis")
+  }
+
+  if (n_runs < 2) {
+    stop("n_runs must be at least 2 to assess stability")
+  }
+
+  # Generate embeddings once for efficiency
+  if (verbose) message("  Generating embeddings (one-time cost)...")
+  embeddings <- tryCatch({
+    generate_embeddings(texts, model = embedding_model, verbose = FALSE)
+  }, error = function(e) {
+    stop("Failed to generate embeddings: ", e$message)
+  })
+
+  if (is.null(embeddings)) {
+    stop("Embedding generation unavailable. Run setup_python_env() first.",
+         call. = FALSE)
+  }
+
+  # Run models with different seeds
+  models <- list()
+  for (i in seq_len(n_runs)) {
+    seed_i <- base_seed + i - 1
+
+    if (verbose) message("  Running model ", i, "/", n_runs, " (seed=", seed_i, ")...")
+
+    model <- tryCatch({
+      fit_embedding_model(
+        texts = texts,
+        embedding_model = embedding_model,
+        precomputed_embeddings = embeddings,
+        seed = seed_i,
+        verbose = FALSE,
+        ...
+      )
+    }, error = function(e) {
+      if (verbose) message("    Run ", i, " failed: ", e$message)
+      NULL
+    })
+
+    if (!is.null(model)) {
+      models[[length(models) + 1]] <- model
+    }
+  }
+
+  if (length(models) < 2) {
+    stop("Need at least 2 successful runs to assess stability. Only ", length(models), " succeeded.")
+  }
+
+  if (verbose) message("  Computing stability metrics...")
+
+  # degenerate single-cluster runs distort mean ARI
+  degenerate <- vapply(models, function(m) {
+    length(unique(m$topic_assignments[m$topic_assignments >= 0])) <= 1
+  }, logical(1))
+  if (any(degenerate) && sum(!degenerate) >= 2) {
+    if (verbose) message("  Excluding ", sum(degenerate), " degenerate run(s)")
+    models <- models[!degenerate]
+  }
+
+  # Calculate pairwise Adjusted Rand Index
+  n_successful <- length(models)
+  ari_values <- c()
+
+  for (i in 1:(n_successful - 1)) {
+    for (j in (i + 1):n_successful) {
+      assignments_i <- models[[i]]$topic_assignments
+      assignments_j <- models[[j]]$topic_assignments
+
+      # Calculate ARI using contingency table approach
+      ari <- tryCatch({
+        if (requireNamespace("aricode", quietly = TRUE)) {
+          aricode::ARI(assignments_i, assignments_j)
+        } else {
+          # Fallback: simple agreement rate
+          mean(assignments_i == assignments_j)
+        }
+      }, error = function(e) NA)
+
+      if (!is.na(ari)) {
+        ari_values <- c(ari_values, ari)
+      }
+    }
+  }
+
+  # Calculate keyword stability (Jaccard similarity)
+  jaccard_values <- c()
+
+  for (i in 1:(n_successful - 1)) {
+    for (j in (i + 1):n_successful) {
+      keywords_i <- unlist(models[[i]]$topic_keywords)
+      keywords_j <- unlist(models[[j]]$topic_keywords)
+
+      if (length(keywords_i) > 0 && length(keywords_j) > 0) {
+        intersection <- length(intersect(keywords_i, keywords_j))
+        union_size <- length(union(keywords_i, keywords_j))
+        jaccard <- if (union_size > 0) intersection / union_size else 0
+        jaccard_values <- c(jaccard_values, jaccard)
+      }
+    }
+  }
+
+  silhouette_scores <- vapply(models, .embedding_silhouette, numeric(1))
+
+  stability_metrics <- list(
+    mean_ari = if (length(ari_values) > 0) mean(ari_values) else NA,
+    sd_ari = if (length(ari_values) > 1) sd(ari_values) else NA,
+    mean_jaccard = if (length(jaccard_values) > 0) mean(jaccard_values) else NA,
+    sd_jaccard = if (length(jaccard_values) > 1) sd(jaccard_values) else NA,
+    mean_silhouette = if (any(!is.na(silhouette_scores))) mean(silhouette_scores, na.rm = TRUE) else NA,
+    quality_variance = if (sum(!is.na(silhouette_scores)) > 1) var(silhouette_scores, na.rm = TRUE) else NA,
+    n_successful_runs = n_successful
+  )
+
+  best_idx <- if (any(!is.na(silhouette_scores))) which.max(silhouette_scores) else 1L
+  best_model <- if (select_best) models[[best_idx]] else NULL
+
+  # Determine stability status and recommendation
+  # 0.8 / 0.6 / 0.4 tiers are package heuristics, not published cutoffs
+  is_stable <- !is.na(stability_metrics$mean_ari) && stability_metrics$mean_ari >= 0.6
+
+  recommendation <- if (is.na(stability_metrics$mean_ari)) {
+    "Could not compute stability metrics."
+  } else if (stability_metrics$mean_ari >= 0.8) {
+    "Highly stable: Results are very consistent across runs."
+  } else if (stability_metrics$mean_ari >= 0.6) {
+    "Moderately stable: Results are reasonably consistent."
+  } else if (stability_metrics$mean_ari >= 0.4) {
+    "Low stability: Consider adjusting parameters or checking data quality."
+  } else {
+    "Unstable: Topic structure may not be well-defined. Try different parameters."
+  }
+
+  if (verbose) {
+    message("\nStability Results:")
+    message("  Mean ARI: ", round(stability_metrics$mean_ari, 3))
+    message("  Mean Keyword Jaccard: ", round(stability_metrics$mean_jaccard, 3))
+    message("  Quality Variance: ", round(stability_metrics$quality_variance, 4))
+    message("  Status: ", if (is_stable) "STABLE" else "UNSTABLE")
+    message("  ", recommendation)
+  }
+
+  list(
+    stability_metrics = stability_metrics,
+    best_model = best_model,
+    all_models = models,
+    is_stable = is_stable,
+    recommendation = recommendation
+  )
+}
+
+
+#' @title Generate Semantic Topic Keywords (c-TF-IDF)
+#'
+#' @description
+#' Generate keywords for topics using c-TF-IDF (class-based TF-IDF), similar to BERTopic.
+#' This method treats all documents in a topic as a single document and calculates TF-IDF
+#' scores relative to other topics.
+#'
+#' @param texts A character vector of texts.
+#' @param topic_assignments A vector of topic assignments.
+#' @param n_keywords The number of keywords to extract per topic (default: 10).
+#' @param method The representation method: "c-tfidf" (default), "tfidf", "mmr", or "frequency".
+#' @param diversity Diversity weight for "mmr" between 0 and 1 (default: 0.5).
+#'   MMR selects terms by (1 - diversity) * relevance - diversity * redundancy.
+#'
+#' @return A list of keywords for each topic.
+#'
+#' @keywords internal
+generate_semantic_topic_keywords <- function(texts,
+                                            topic_assignments,
+                                            n_keywords = 10,
+                                            method = "c-tfidf",
+                                            diversity = 0.5) {
+
+  tryCatch({
+    unique_topics <- sort(unique(topic_assignments[topic_assignments >= 0]))
+    topic_keywords <- list()
+
+    if (method %in% c("c-tfidf", "mmr")) {
+      topic_docs <- vapply(unique_topics, function(topic) {
+        paste(texts[topic_assignments == topic], collapse = " ")
+      }, character(1))
+
+      class_tokens <- quanteda::tokens(quanteda::corpus(topic_docs),
+                                       remove_punct = TRUE,
+                                       remove_numbers = TRUE,
+                                       remove_symbols = TRUE)
+      class_tokens <- quanteda::tokens_tolower(class_tokens)
+      class_tokens <- quanteda::tokens_remove(class_tokens, quanteda::stopwords("english"))
+
+      # c-TF-IDF: W_tc = tf_tc * log(1 + A / tf_t), A = mean words per class
+      tf_mat <- as.matrix(quanteda::dfm(class_tokens))
+      avg_class_size <- mean(rowSums(tf_mat))
+      term_totals <- colSums(tf_mat)
+      ctfidf_mat <- sweep(tf_mat, 2, log(1 + avg_class_size / term_totals), `*`)
+
+      if (method == "c-tfidf") {
+        for (i in seq_along(unique_topics)) {
+          scores <- ctfidf_mat[i, ]
+          scores <- scores[is.finite(scores)]
+          top_idx <- order(scores, decreasing = TRUE)[seq_len(min(n_keywords, length(scores)))]
+          topic_keywords[[as.character(unique_topics[i])]] <- names(scores)[top_idx]
+        }
+      } else {
+        doc_tokens <- quanteda::tokens(quanteda::corpus(texts),
+                                       remove_punct = TRUE,
+                                       remove_numbers = TRUE,
+                                       remove_symbols = TRUE)
+        doc_tokens <- quanteda::tokens_tolower(doc_tokens)
+        doc_tokens <- quanteda::tokens_remove(doc_tokens, quanteda::stopwords("english"))
+        doc_dfm <- quanteda::dfm(doc_tokens)
+
+        lambda <- 1 - diversity
+        for (i in seq_along(unique_topics)) {
+          topic <- unique_topics[i]
+          relevance <- ctfidf_mat[i, ]
+          relevance <- relevance[relevance > 0 & is.finite(relevance)]
+
+          # candidate pool of 3x keywords bounds the pairwise similarity cost
+          n_candidates <- min(3 * n_keywords, length(relevance))
+          candidates <- names(sort(relevance, decreasing = TRUE))[seq_len(n_candidates)]
+          candidates <- intersect(candidates, colnames(doc_dfm))
+
+          if (length(candidates) == 0) {
+            topic_keywords[[as.character(topic)]] <- character(0)
+            next
+          }
+
+          # redundancy = cosine between term occurrence vectors over topic docs
+          occurrence <- as.matrix(doc_dfm[which(topic_assignments == topic), candidates, drop = FALSE])
+          unit_cols <- sweep(occurrence, 2, pmax(sqrt(colSums(occurrence^2)), 1e-12), `/`)
+          term_sim <- crossprod(unit_cols)
+
+          rel <- relevance[candidates] / max(relevance[candidates])
+          selected <- candidates[which.max(rel)]
+          remaining <- setdiff(candidates, selected)
+
+          while (length(selected) < min(n_keywords, length(candidates)) && length(remaining) > 0) {
+            max_sim <- apply(term_sim[remaining, selected, drop = FALSE], 1, max)
+            mmr_score <- lambda * rel[remaining] - (1 - lambda) * max_sim
+            pick <- remaining[which.max(mmr_score)]
+            selected <- c(selected, pick)
+            remaining <- setdiff(remaining, pick)
+          }
+          topic_keywords[[as.character(topic)]] <- selected
+        }
+      }
+
+    } else if (method == "tfidf") {
+      for (topic in unique_topics) {
+        topic_texts <- texts[topic_assignments == topic]
+
+        if (length(topic_texts) < 1) {
+          topic_keywords[[as.character(topic)]] <- character(0)
+          next
+        }
+
+        corpus <- quanteda::corpus(topic_texts)
+        tokens <- quanteda::tokens(corpus,
+                                   remove_punct = TRUE,
+                                   remove_numbers = TRUE)
+        tokens <- quanteda::tokens_tolower(tokens)
+        tokens <- quanteda::tokens_remove(tokens, quanteda::stopwords("english"))
+
+        dfm <- quanteda::dfm(tokens)
+
+        tfidf <- quanteda::dfm_tfidf(dfm)
+
+        mean_tfidf <- colMeans(as.matrix(tfidf))
+        mean_tfidf <- sort(mean_tfidf, decreasing = TRUE)
+
+        top_terms <- names(head(mean_tfidf, n_keywords))
+        topic_keywords[[as.character(topic)]] <- top_terms
+      }
+
+    } else {
+      return(generate_topic_keywords(texts, topic_assignments, n_keywords))
+    }
+
+    return(topic_keywords)
+
+  }, error = function(e) {
+    warning("Error in c-TF-IDF calculation: ", e$message)
+    return(generate_topic_keywords(texts, topic_assignments, n_keywords))
+  })
+}
+
+
+#' @title Generate Topic Keywords
+#'
+#' @description
+#' Internal function to generate keywords for topics using TF-IDF analysis.
+#'
+#' @param texts A character vector of texts.
+#' @param topic_assignments A vector of topic assignments.
+#' @param n_keywords The number of keywords to extract per topic.
+#'
+#' @return A list of keywords for each topic.
+#'
+#' @keywords internal
+generate_topic_keywords <- function(texts, topic_assignments, n_keywords = 10) {
+  tryCatch({
+    topic_keywords <- list()
+    unique_topics <- unique(topic_assignments)
+
+    for (topic in unique_topics) {
+      topic_texts <- texts[topic_assignments == topic]
+
+      if (length(topic_texts) < 2) {
+        topic_keywords[[as.character(topic)]] <- character(0)
+        next
+      }
+
+      corpus <- quanteda::corpus(topic_texts)
+      tokens <- quanteda::tokens(corpus,
+                                 remove_punct = TRUE,
+                                 remove_numbers = TRUE,
+                                 remove_symbols = TRUE,
+                                 remove_separators = TRUE)
+      tokens <- quanteda::tokens_tolower(tokens)
+      tokens <- quanteda::tokens_remove(tokens, quanteda::stopwords("english"))
+
+      dfm <- quanteda::dfm(tokens)
+      dfm <- quanteda::dfm_trim(dfm, min_termfreq = 2, min_docfreq = 1)
+
+      if (quanteda::nfeat(dfm) == 0) {
+        topic_keywords[[as.character(topic)]] <- character(0)
+        next
+      }
+
+      top_terms <- quanteda.textstats::textstat_frequency(dfm, n = n_keywords)
+      topic_keywords[[as.character(topic)]] <- top_terms$feature
+    }
+
+    return(topic_keywords)
+
+  }, error = function(e) {
+    warning("Error generating topic keywords: ", e$message)
+    return(list())
+  })
+}
+
+#' @title Calculate Semantic Topic Quality Metrics
+#'
+#' @description
+#' Internal function to calculate quality metrics for semantic topic modeling results.
+#'
+#' @param embeddings Document embeddings matrix.
+#' @param topic_assignments Vector of topic assignments.
+#' @param similarity_matrix Optional similarity matrix.
+#'
+#' @return A list of quality metrics.
+#'
+#' @keywords internal
+calculate_topic_quality <- function(embeddings, topic_assignments, similarity_matrix = NULL) {
+  tryCatch({
+    metrics <- list()
+
+    unique_topics <- unique(topic_assignments)
+
+    # Vectorized topic coherence calculation using vapply
+    topic_coherence <- vapply(unique_topics, function(topic) {
+      topic_docs <- which(topic_assignments == topic)
+      if (length(topic_docs) > 1) {
+        if (!is.null(similarity_matrix)) {
+          topic_sim <- similarity_matrix[topic_docs, topic_docs]
+          mean(topic_sim[upper.tri(topic_sim)], na.rm = TRUE)
+        } else {
+          topic_embeddings <- embeddings[topic_docs, , drop = FALSE]
+          topic_sim <- as.matrix(stats::dist(topic_embeddings, method = "euclidean"))
+          1 - mean(topic_sim[upper.tri(topic_sim)], na.rm = TRUE)
+        }
+      } else {
+        NA_real_
+      }
+    }, FUN.VALUE = numeric(1))
+
+    metrics$mean_topic_coherence <- mean(topic_coherence, na.rm = TRUE)
+    metrics$topic_coherence_sd <- sd(topic_coherence, na.rm = TRUE)
+
+    if (length(unique_topics) > 1) {
+      # Vectorized centroid calculation using vapply
+      topic_centroids <- t(vapply(unique_topics, function(topic) {
+        topic_docs <- which(topic_assignments == topic)
+        colMeans(embeddings[topic_docs, , drop = FALSE])
+      }, FUN.VALUE = numeric(ncol(embeddings))))
+
+      centroid_distances <- as.matrix(stats::dist(topic_centroids, method = "euclidean"))
+      metrics$mean_topic_separation <- mean(centroid_distances[upper.tri(centroid_distances)], na.rm = TRUE)
+    } else {
+      metrics$mean_topic_separation <- NA
+    }
+
+    topic_sizes <- table(topic_assignments)
+    metrics$topic_size_mean <- mean(topic_sizes)
+    metrics$topic_size_sd <- sd(topic_sizes)
+    metrics$topic_size_min <- min(topic_sizes)
+    metrics$topic_size_max <- max(topic_sizes)
+
+    if (!is.na(metrics$mean_topic_coherence) && !is.na(metrics$mean_topic_separation)) {
+      metrics$overall_quality <- metrics$mean_topic_coherence * (1 / (1 + metrics$mean_topic_separation))
+    } else {
+      metrics$overall_quality <- NA
+    }
+
+    return(metrics)
+
+  }, error = function(e) {
+    warning("Error calculating quality metrics: ", e$message)
+    return(list())
+  })
+}
+
+#' @title Fit Temporal Topic Model
+#' @description Analyzes how topics evolve over time by fitting topic models to
+#'   different time periods and tracking semantic changes.
+#' @param texts A character vector of text documents to analyze.
+#' @param dates A vector of dates corresponding to each document (will be converted to Date).
+#' @param time_windows Time grouping strategy: "yearly", "monthly", or "quarterly" (default: "yearly").
+#' @param embeddings Optional pre-computed embeddings matrix. If NULL, embeddings will be generated.
+#' @param verbose Logical indicating whether to print progress messages (default: TRUE).
+#' @return A list containing temporal analysis results with topic evolution patterns.
+#' @concept topic-modeling
+#' @export
+fit_temporal_model <- function(texts,
+                                     dates,
+                                     time_windows = "yearly",
+                                     embeddings = NULL,
+                                     verbose = TRUE) {
+
+  if (verbose) message("Starting temporal semantic analysis...")
+
+  dates <- as.Date(dates)
+
+  if (time_windows == "yearly") {
+    time_groups <- format(dates, "%Y")
+  } else if (time_windows == "monthly") {
+    time_groups <- format(dates, "%Y-%m")
+  } else if (time_windows == "quarterly") {
+    time_groups <- paste(format(dates, "%Y"), "Q", (as.numeric(format(dates, "%m")) - 1) %/% 3 + 1, sep = "")
+  }
+
+  time_periods <- unique(time_groups)
+  temporal_results <- list()
+
+  for (period in time_periods) {
+    period_indices <- which(time_groups == period)
+    period_texts <- texts[period_indices]
+
+    if (length(period_texts) < 5) {
+      if (verbose) message("Skipping period ", period, " (insufficient documents)")
+      next
+    }
+
+    if (verbose) message("Analyzing period: ", period)
+
+    period_embeddings <- if (!is.null(embeddings)) {
+      embeddings[period_indices, , drop = FALSE]
+    } else {
+      pe <- generate_embeddings(period_texts, verbose = FALSE)
+      if (is.null(pe)) {
+        stop("Embedding generation unavailable. Run setup_python_env() first.",
+             call. = FALSE)
+      }
+      pe
+    }
+
+    period_results <- fit_embedding_model(
+      texts = period_texts,
+      method = "umap_hdbscan",
+      n_topics = 10,
+      embedding_model = "all-MiniLM-L6-v2",
+      verbose = FALSE
+    )
+
+    temporal_results[[period]] <- list(
+      texts = period_texts,
+      embeddings = period_embeddings,
+      topic_assignments = period_results$topic_assignments,
+      topic_keywords = period_results$topic_keywords,
+      n_documents = length(period_texts),
+      n_topics = period_results$n_topics
+    )
+  }
+
+  evolution_patterns <- analyze_semantic_evolution(temporal_results, verbose = verbose)
+
+  result <- list(
+    temporal_results = temporal_results,
+    evolution_patterns = evolution_patterns,
+    time_windows = time_windows,
+    periods_analyzed = names(temporal_results)
+  )
+
+  if (verbose) message("Temporal analysis completed. Analyzed ", length(temporal_results), " periods")
+
+  return(result)
+}
+
+calculate_topic_correspondence <- function(semantic_keywords, stm_keywords) {
+
+  correspondence_matrix <- matrix(0,
+                                 nrow = length(semantic_keywords),
+                                 ncol = length(stm_keywords))
+
+  for (i in seq_along(semantic_keywords)) {
+    for (j in seq_along(stm_keywords)) {
+      semantic_terms <- semantic_keywords[[i]]
+      stm_terms <- stm_keywords[[j]]
+
+      intersection <- length(intersect(semantic_terms, stm_terms))
+      union <- length(union(semantic_terms, stm_terms))
+
+      correspondence_matrix[i, j] <- if (union > 0) intersection / union else 0
+    }
+  }
+
+  return(list(
+    correspondence_matrix = correspondence_matrix,
+    mean_correspondence = mean(correspondence_matrix),
+    max_correspondence = max(correspondence_matrix)
+  ))
+}
+
+#' @title Validate Semantic Coherence
+#'
+#' @description
+#' Validates semantic coherence of topic assignments.
+#'
+#' @param embeddings Document embeddings.
+#' @param topic_assignments Topic assignments.
+#'
+#' @return Coherence metrics.
+#'
+#' @keywords internal
+calculate_coherence <- function(embeddings, topic_assignments) {
+
+  unique_topics <- unique(topic_assignments)
+  coherence_scores <- numeric(length(unique_topics))
+
+  for (i in seq_along(unique_topics)) {
+    topic_docs <- which(topic_assignments == unique_topics[i])
+
+    if (length(topic_docs) > 1) {
+      topic_embeddings <- embeddings[topic_docs, , drop = FALSE]
+      norms <- sqrt(rowSums(topic_embeddings^2))
+      keep <- norms > 0
+      if (sum(keep) > 1) {
+        norm_emb <- topic_embeddings[keep, , drop = FALSE] / norms[keep]
+        sim <- norm_emb %*% t(norm_emb)
+        coherence_scores[i] <- mean(sim[upper.tri(sim)], na.rm = TRUE)
+      } else {
+        coherence_scores[i] <- NA
+      }
+    } else {
+      coherence_scores[i] <- NA
+    }
+  }
+
+  list(
+    coherence_scores = coherence_scores,
+    mean_coherence = mean(coherence_scores, na.rm = TRUE),
+    topic_coherence = setNames(coherence_scores, unique_topics)
+  )
+}
+
+#' @title Calculate Topic Stability
+#'
+#' @description
+#' Calculates stability of topics across consecutive time periods. Each
+#' period is fitted independently, so topics are matched one-to-one on
+#' keyword Jaccard similarity before scoring
+#' (see [calculate_keyword_stability()]).
+#'
+#' @param temporal_results Results from temporal analysis.
+#'
+#' @return Stability metrics: matched-pair stability per consecutive-period
+#'   transition and their mean.
+#'
+#' @concept topic-modeling
+#' @export
+calculate_topic_stability <- function(temporal_results) {
+
+  periods <- names(temporal_results)
+  stability_scores <- numeric(length(periods) - 1)
+
+  for (i in 1:(length(periods) - 1)) {
+    period1 <- periods[i]
+    period2 <- periods[i + 1]
+
+    keywords1 <- temporal_results[[period1]]$topic_keywords
+    keywords2 <- temporal_results[[period2]]$topic_keywords
+
+    stability_scores[i] <- calculate_keyword_stability(keywords1, keywords2)
+  }
+
+  return(list(
+    stability_scores = stability_scores,
+    mean_stability = mean(stability_scores, na.rm = TRUE),
+    periods = paste(periods[-length(periods)], periods[-1], sep = " -> ")
+  ))
+}
+
+#' @title Calculate Keyword Stability
+#'
+#' @description
+#' Calculates stability between the topic keyword sets of two independently
+#' fitted models. Topic numbering is arbitrary across fits, so topics are
+#' matched one-to-one by greedy assignment on the pairwise keyword Jaccard
+#' matrix before averaging matched-pair similarity.
+#'
+#' @param keywords1 List of keyword vectors, one per topic, from the first model.
+#' @param keywords2 List of keyword vectors, one per topic, from the second model.
+#'
+#' @return Mean Jaccard similarity of matched topic pairs (0-1).
+#'
+#' @concept topic-modeling
+#' @export
+calculate_keyword_stability <- function(keywords1, keywords2) {
+
+  if (length(keywords1) == 0 || length(keywords2) == 0) {
+    return(0)
+  }
+
+  jaccard <- calculate_topic_correspondence(keywords1, keywords2)$correspondence_matrix
+
+  # greedy one-to-one matching: repeatedly pair the most similar topics
+  n_matches <- min(nrow(jaccard), ncol(jaccard))
+  matched <- numeric(n_matches)
+  for (k in seq_len(n_matches)) {
+    best <- arrayInd(which.max(jaccard), dim(jaccard))
+    matched[k] <- jaccard[best[1], best[2]]
+    jaccard[best[1], ] <- -Inf
+    jaccard[, best[2]] <- -Inf
+  }
+
+  mean(matched)
+}
+
+#' @title Calculate Topic-Cluster Correspondence
+#' @description
+#' Computes Jaccard-based correspondence between topic keywords and cluster keywords.
+#'
+#' @param topic_keywords Topic keywords list.
+#' @param cluster_keywords Cluster keywords list.
+#' @param ... Additional parameters (currently unused).
+#'
+#' @return List with correspondence metrics.
+#'
+#' @keywords internal
+calculate_topic_cluster_correspondence <- function(topic_keywords, cluster_keywords, ...) {
+  result <- calculate_topic_correspondence(topic_keywords, cluster_keywords)
+  list(
+    match_score = result$mean_correspondence,
+    n_topics = length(topic_keywords),
+    n_clusters = length(cluster_keywords),
+    correspondence_matrix = result$correspondence_matrix
+  )
+}
+
+#' @title Validate Semantic Coherence
+#' @description Validates the semantic coherence of topic assignments using
+#'   intra-cluster distance in embedding space.
+#' @param embeddings Document embeddings matrix.
+#' @param topic_assignments Vector of topic assignments for documents.
+#' @param ... Additional parameters (currently unused).
+#' @return List containing coherence score and metrics.
+#' @concept topic-modeling
+#' @export
+validate_semantic_coherence <- function(embeddings, topic_assignments, ...) {
+  result <- calculate_coherence(embeddings, topic_assignments)
+  list(
+    score = result$mean_coherence,
+    n_topics = length(unique(topic_assignments)),
+    per_topic = result$topic_coherence
+  )
+}
+
+#' @title Calculate Assignment Consistency
+#' @description Calculates consistency between two sets of assignments
+#' @param assignments1 First set of assignments
+#' @param assignments2 Second set of assignments
+#' @param ... Additional parameters
+#' @return List containing consistency metrics
+#' @concept topic-modeling
+#' @export
+calculate_assignment_consistency <- function(assignments1, assignments2, ...) {
+  if (length(assignments1) != length(assignments2)) {
+    return(list(consistency = NA, message = "Assignment lengths differ"))
+  }
+
+  if (!requireNamespace("aricode", quietly = TRUE)) {
+    return(list(
+      consistency = NA,
+      n_total = length(assignments1),
+      message = "Install 'aricode' for permutation-invariant consistency (ARI)."
+    ))
+  }
+
+  ari <- aricode::ARI(assignments1, assignments2)
+  nmi <- aricode::NMI(assignments1, assignments2)
+
+  list(
+    consistency = ari,
+    ari = ari,
+    nmi = nmi,
+    n_total = length(assignments1)
+  )
+}
+
+#' @title Analyze Semantic Evolution
+#' @description Analyzes semantic evolution patterns in temporal results
+#' @param temporal_results Temporal analysis results
+#' @param verbose Logical indicating whether to print progress messages
+#' @param ... Additional parameters
+#' @return List containing evolution analysis
+#' @concept topic-modeling
+#' @export
+analyze_semantic_evolution <- function(temporal_results, verbose = FALSE, ...) {
+  if (verbose) message("Analyzing semantic evolution...")
+
+  periods <- names(temporal_results)
+  if (length(periods) < 2) {
+    return(list(
+      periods_analyzed = length(periods),
+      topic_stability = NA,
+      evolution_patterns = list(emergence = character(), decline = character(), stable = character())
+    ))
+  }
+
+  topic_stability <- calculate_topic_stability(temporal_results)
+  semantic_drift <- calculate_semantic_drift(temporal_results)
+
+  list(
+    periods_analyzed = length(periods),
+    topic_stability = topic_stability,
+    semantic_drift = semantic_drift
+  )
+}
+
+#' @title Calculate Semantic Drift
+#' @description Calculates semantic drift across time periods
+#' @param temporal_results Temporal analysis results
+#' @param ... Additional parameters
+#' @return List containing drift metrics
+#' @concept topic-modeling
+#' @export
+calculate_semantic_drift <- function(temporal_results, ...) {
+  if (is.null(temporal_results) || length(temporal_results) < 2) {
+    return(list(drift_score = NA, message = "Insufficient temporal data"))
+  }
+
+  centroids <- lapply(temporal_results, function(p) {
+    if (is.null(p$embeddings) || !is.matrix(p$embeddings) || nrow(p$embeddings) == 0) return(NULL)
+    colMeans(p$embeddings)
+  })
+
+  drift_scores <- vapply(seq_len(length(centroids) - 1), function(i) {
+    a <- centroids[[i]]; b <- centroids[[i + 1]]
+    if (is.null(a) || is.null(b)) return(NA_real_)
+    1 - .cosine_sim(a, b)
+  }, numeric(1))
+
+  if (all(is.na(drift_scores))) {
+    return(list(drift_scores = drift_scores, mean_drift = NA_real_, max_drift = NA_real_,
+                message = "No periods had embeddings to compare"))
+  }
+
+  list(
+    drift_scores = drift_scores,
+    mean_drift = mean(drift_scores, na.rm = TRUE),
+    max_drift = max(drift_scores, na.rm = TRUE)
+  )
+}
+
+#' @title Identify Topic Trends
+#' @description Identifies trending topics in temporal results
+#' @param temporal_results Temporal analysis results
+#' @param ... Additional parameters
+#' @return List containing identified trends
+#' @concept topic-modeling
+#' @export
+identify_topic_trends <- function(temporal_results, ...) {
+  if (is.null(temporal_results) || length(temporal_results) < 2) {
+    return(list(trends = NULL, message = "Insufficient temporal data"))
+  }
+
+  all_topics <- unique(unlist(lapply(temporal_results, function(r) {
+    unique(r$topic_assignments)
+  })))
+
+  prevalence_matrix <- sapply(temporal_results, function(r) {
+    counts <- table(factor(r$topic_assignments, levels = all_topics))
+    counts / sum(counts)
+  })
+
+  increasing <- character()
+  decreasing <- character()
+  stable <- character()
+
+  for (i in seq_len(nrow(prevalence_matrix))) {
+    trend <- prevalence_matrix[i, ]
+    if (length(trend) < 2) next
+    slope <- coef(lm(trend ~ seq_along(trend)))[2]
+    topic_label <- rownames(prevalence_matrix)[i]
+    if (slope > 0.01) increasing <- c(increasing, topic_label)
+    else if (slope < -0.01) decreasing <- c(decreasing, topic_label)
+    else stable <- c(stable, topic_label)
+  }
+
+  list(
+    increasing = increasing,
+    decreasing = decreasing,
+    stable = stable,
+    prevalence_matrix = prevalence_matrix
+  )
+}
+
+
+#' Plot Topic Model Quality Metrics
+#'
+#' @description
+#' Creates individual diagnostic metric plots across different K values
+#' from stm::searchK results.
+#'
+#' @param search_results Results from stm::searchK or find_optimal_k()
+#'
+#' @return A named list of ggplot objects, one per available metric
+#'   (possible keys: semcoh, residual, heldout, lbound).
+#'
+#' @concept topic-modeling
+#' @export
+plot_quality_metrics <- function(search_results) {
+
+  results_data <- if ("results" %in% names(search_results)) {
+    search_results$results
+  } else {
+    search_results
+  }
+
+  for (col in names(results_data)) {
+    if (is.list(results_data[[col]])) {
+      results_data[[col]] <- unlist(results_data[[col]])
+    }
+    if (col %in% c("residual", "lbound", "semcoh", "exclus", "heldout", "K")) {
+      results_data[[col]] <- as.numeric(results_data[[col]])
+    }
+  }
+
+  metric_info <- list(
+    semcoh = list(name = "Semantic Coherence", color = "#4A90E2"),
+    residual = list(name = "Residuals", color = "#E74C3C"),
+    heldout = list(name = "Held-out Likelihood", color = "#9B59B6"),
+    lbound = list(name = "Lower Bound", color = "#F39C12")
+  )
+
+  available_metrics <- intersect(names(metric_info), names(results_data))
+
+  if (length(available_metrics) == 0) {
+    stop("No valid metrics found in search results")
+  }
+
+  plots <- stats::setNames(vector("list", length(available_metrics)), available_metrics)
+  for (metric in available_metrics) {
+    info <- metric_info[[metric]]
+
+    plot_df <- data.frame(
+      K = results_data$K,
+      value = results_data[[metric]]
+    )
+    plot_df$hover_text <- paste("K:", plot_df$K, "<br>", info$name, ":", round(plot_df$value, 4))
+
+    plots[[metric]] <- ggplot2::ggplot(plot_df, ggplot2::aes(x = K, y = value, text = .data$hover_text)) +
+      ggplot2::geom_line(color = info$color, linewidth = 0.8) +
+      ggplot2::geom_point(color = info$color, size = 2.5) +
+      ggplot2::labs(x = "Number of Topics (K)", y = info$name, title = info$name) +
+      ggplot2::theme_minimal(base_size = 11) +
+      ggplot2::theme(
+        plot.title = ggplot2::element_text(size = 13, color = "#0c1f4a", hjust = 0.5),
+        panel.grid.minor = ggplot2::element_blank(),
+        panel.grid.major = ggplot2::element_line(color = "#E5E7EB", linewidth = 0.3),
+        axis.line = ggplot2::element_line(color = "#3B3B3B", linewidth = 0.5),
+        axis.text = ggplot2::element_text(color = "#3B3B3B"),
+        axis.title = ggplot2::element_text(color = "#0c1f4a")
+      )
+  }
+
+  plots
+}
+
+
+#' Plot Topic Model Comparison Scatter
+#'
+#' @description
+#' Creates a scatter plot comparing topic model metrics across K values.
+#' Automatically selects the best available metric combination.
+#'
+#' @param search_results Results from stm::searchK or find_optimal_k()
+#' @param title Plot title (default `NULL` selects an auto-title based on which metric columns are present in `search_results`)
+#' @param height Plot height in pixels (default: 600)
+#' @param width Plot width in pixels (default: 800)
+#'
+#' @return A plotly scatter plot
+#'
+#' @concept topic-modeling
+#' @export
+plot_model_comparison <- function(search_results,
+                                  title = NULL,
+                                  height = 600,
+                                  width = 800) {
+
+  comparison_data <- if ("results" %in% names(search_results)) {
+    search_results$results
+  } else {
+    search_results
+  }
+
+  for (col in names(comparison_data)) {
+    if (is.list(comparison_data[[col]])) {
+      comparison_data[[col]] <- unlist(comparison_data[[col]])
+    }
+    if (col %in% c("residual", "lbound", "semcoh", "exclus", "K")) {
+      comparison_data[[col]] <- as.numeric(comparison_data[[col]])
+    }
+  }
+
+  if ("semcoh" %in% names(comparison_data) && "exclus" %in% names(comparison_data)) {
+    x_values <- comparison_data$semcoh
+    y_values <- comparison_data$exclus
+    x_label <- "Semantic Coherence"
+    y_label <- "Exclusivity"
+    auto_title <- "Coherence-Exclusivity Frontier (choose K in the upper-right)"
+  } else if ("semcoh" %in% names(comparison_data)) {
+    x_values <- comparison_data$semcoh
+    y_values <- comparison_data$residual
+    x_label <- "Semantic Coherence"
+    y_label <- "Residual"
+    auto_title <- "Coherence-Residual Trade-off (exclusivity unavailable for content-covariate models)"
+  } else {
+    x_values <- comparison_data$lbound
+    y_values <- comparison_data$residual
+    x_label <- "Lower Bound"
+    y_label <- "Residual"
+    auto_title <- "Lower Bound vs Residual"
+  }
+
+  if (is.null(title)) title <- auto_title
+
+  k_values <- comparison_data$K
+  k_normalized <- (k_values - min(k_values)) / max(1, max(k_values) - min(k_values))
+  marker_sizes <- 5 + k_normalized * 8
+
+  colors <- grDevices::colorRampPalette(c("#0066CC", "#CC3300"))(length(k_values))
+
+  plot_df <- data.frame(x = x_values, y = y_values, k = k_values, sz = marker_sizes)
+  plot_df$hover_text <- paste("K:", plot_df$k,
+                               paste0("<br>", x_label, ":"), round(plot_df$x, 4),
+                               paste0("<br>", y_label, ":"), round(plot_df$y, 4))
+
+  ggplot2::ggplot(plot_df, ggplot2::aes(x = x, y = y, text = hover_text)) +
+    ggplot2::geom_point(size = plot_df$sz, color = colors, alpha = 0.9) +
+    ggplot2::geom_text(ggplot2::aes(label = k), color = "white", size = 3.5, fontface = "bold") +
+    ggplot2::labs(x = x_label, y = y_label, title = title) +
+    ggplot2::theme_minimal(base_size = 11) +
+    ggplot2::theme(
+      plot.title = ggplot2::element_text(size = 13, color = "#0c1f4a", hjust = 0.5),
+      axis.line = ggplot2::element_line(color = "#3B3B3B", linewidth = 0.5),
+      axis.text = ggplot2::element_text(size = 11, color = "#3B3B3B"),
+      axis.title = ggplot2::element_text(size = 12, color = "#0c1f4a"),
+      panel.grid = ggplot2::element_blank()
+    )
+}
+
+
+# Topic modeling visualization functions
+
+#' @title Plot Word Probabilities by Topic
+#'
+#' @description
+#' Creates a faceted bar plot showing the top terms and their probabilities (beta values)
+#' for each topic in a topic model.
+#'
+#' @param top_topic_terms A data frame containing topic terms with columns: topic, term, and beta.
+#' @param topic_label Optional topic labels. Can be either a named vector mapping topic numbers
+#'   to labels, or a character string specifying a column name in top_topic_terms (default: NULL).
+#' @param ncol Number of columns for facet wrap layout (default: 3).
+#' @param height Plot height for responsive spacing adjustments (default: 1200).
+#' @param width Plot width for responsive spacing adjustments (default: 800).
+#' @param ylab Y-axis label (default: "Word probability").
+#' @param title Plot title (default: NULL for auto-generated title).
+#' @param colors Color palette for topics (default: NULL for auto-generated colors).
+#' @param measure_label Label for the probability measure (default: "Beta").
+#' @param base_font_size Base font size in points for the plot theme (default: 11). Axis text and strip text will be base_font_size + 2.
+#' @param ... Additional arguments (currently unused, kept for compatibility).
+#'
+#' @return A ggplot2 object showing word probabilities faceted by topic.
+#'
+#' @concept topic-modeling
+#' @export
+plot_word_probability <- function(top_topic_terms,
+                                   topic_label = NULL,
+                                   ncol = 3,
+                                   height = 1200,
+                                   width = 800,
+                                   ylab = "Word probability",
+                                   title = NULL,
+                                   colors = NULL,
+                                   measure_label = "Beta",
+                                   base_font_size = 11,
+                                   ...) {
+
+  if (!"topic" %in% colnames(top_topic_terms)) {
+    stop("The data frame must contain a 'topic' column.")
+  }
+
+  top_topic_terms <- top_topic_terms %>%
+    dplyr::mutate(topic = as.character(topic))
+
+  if (!is.null(topic_label)) {
+    if (is.vector(topic_label) && !is.null(names(topic_label))) {
+      manual_labels_df <- data.frame(
+        topic = names(topic_label),
+        label = unname(topic_label),
+        stringsAsFactors = FALSE
+      )
+      top_topic_terms <- top_topic_terms %>%
+        dplyr::left_join(manual_labels_df, by = "topic") %>%
+        dplyr::mutate(labeled_topic = ifelse(!is.na(label), label, paste("Topic", topic))) %>%
+        dplyr::select(-label)
+    } else if (is.character(topic_label) && length(topic_label) == 1) {
+      if (!topic_label %in% colnames(top_topic_terms)) {
+        stop(paste("Column", topic_label, "not found in top_topic_terms."))
+      }
+      top_topic_terms <- top_topic_terms %>%
+        dplyr::mutate(labeled_topic = as.character(.data[[topic_label]]))
+    } else {
+      top_topic_terms <- top_topic_terms %>%
+        dplyr::mutate(labeled_topic = paste("Topic", topic))
+    }
+  } else {
+    top_topic_terms <- top_topic_terms %>%
+      dplyr::mutate(labeled_topic = paste("Topic", topic))
+  }
+
+  top_topic_terms <- top_topic_terms %>%
+    dplyr::mutate(
+      ord = factor(topic, levels = sort(as.numeric(unique(topic)))),
+      term = tidytext::reorder_within(term, beta, labeled_topic)
+    ) %>%
+    dplyr::arrange(ord) %>%
+    dplyr::ungroup()
+
+  levelt <- top_topic_terms %>%
+    dplyr::arrange(as.numeric(topic)) %>%
+    dplyr::distinct(labeled_topic) %>%
+    dplyr::pull(labeled_topic)
+
+  top_topic_terms$labeled_topic <- factor(top_topic_terms$labeled_topic, levels = levelt)
+
+  ggplot_obj <- ggplot2::ggplot(
+    top_topic_terms,
+    ggplot2::aes(term, beta, fill = labeled_topic,
+                 text = paste0("Term: ", gsub("___.*$", "", term), "<br>",
+                              "Topic: ", labeled_topic, "<br>",
+                              measure_label, ": ", sprintf("%.3f", beta)))
+  ) +
+    ggplot2::geom_col(show.legend = FALSE, alpha = 0.8) +
+    ggplot2::facet_wrap(~ labeled_topic, scales = "free", ncol = ncol, strip.position = "top") +
+    tidytext::scale_x_reordered() +
+    ggplot2::scale_y_continuous(labels = .number_labeller(3)) +
+    ggplot2::coord_flip() +
+    ggplot2::xlab("") +
+    ggplot2::ylab(ylab) +
+    ggplot2::theme_minimal(base_size = base_font_size) +
+    ggplot2::theme(
+      legend.position = "none",
+      panel.grid.major = ggplot2::element_blank(),
+      panel.grid.minor = ggplot2::element_blank(),
+      axis.line = ggplot2::element_line(color = "#3B3B3B", linewidth = 0.3),
+      axis.ticks = ggplot2::element_line(color = "#3B3B3B", linewidth = 0.3),
+      strip.text.x = ggplot2::element_text(
+        size = base_font_size,
+        color = "#0c1f4a",
+        lineheight = ifelse(width > 1000, 1.1, 1.2),
+        margin = ggplot2::margin(l = 10, r = 10)
+      ),
+      panel.spacing.x = ggplot2::unit(ifelse(width > 1000, 2.2, 1.6), "lines"),
+      panel.spacing.y = ggplot2::unit(ifelse(width > 1000, 2.2, 1.6), "lines"),
+      axis.text.x = ggplot2::element_text(size = base_font_size, color = "#3B3B3B", hjust = 1, margin = ggplot2::margin(r = 20)),
+      axis.text.y = ggplot2::element_text(size = base_font_size, color = "#3B3B3B", margin = ggplot2::margin(t = 20)),
+      axis.title = ggplot2::element_text(size = base_font_size, color = "#0c1f4a"),
+      axis.title.x = ggplot2::element_text(margin = ggplot2::margin(t = 25)),
+      axis.title.y = ggplot2::element_text(margin = ggplot2::margin(r = 25))
+    )
+
+  if (!is.null(colors)) {
+    ggplot_obj <- ggplot_obj + ggplot2::scale_fill_manual(values = colors)
+  }
+
+  ggplot_obj
+}
+
+
+#' @title Plot Per-Document Per-Topic Probabilities
+#'
+#' @description
+#' Generates a bar plot showing the prevalence of each topic across all documents.
+#'
+#' @param gamma_data A data frame with gamma values from calculate_topic_probability().
+#' @param top_n The number of topics to display (default: 10).
+#' @param use_topic_labels Logical. If TRUE, use the `topic_label` column from `gamma_data` for axis labels (falls back to topic number when the column is absent). If FALSE (default), labels are formatted as "Topic N".
+#' @param colors Optional color palette for topics (default: NULL).
+#' @param ylab Y-axis label (default: "Topic Proportion").
+#' @param base_font_size Base font size in points for the plot theme (default: 11). Axis text and strip text will be base_font_size + 2.
+#'
+#' @return A ggplot2 object showing a bar plot of topic prevalence.
+#'
+#' @concept topic-modeling
+#' @export
+plot_topic_probability <- function(gamma_data,
+                                   top_n = 10,
+                                   use_topic_labels = FALSE,
+                                   colors = NULL,
+                                   ylab = "Topic Proportion",
+                                   base_font_size = 11) {
+
+    gamma_terms <- gamma_data
+    if (!is.null(top_n) && top_n < nrow(gamma_terms)) {
+      gamma_terms <- gamma_terms %>%
+        dplyr::top_n(top_n, gamma)
+    }
+
+    if (isTRUE(use_topic_labels)) {
+      if ("topic_label" %in% names(gamma_terms)) {
+        gamma_terms <- gamma_terms %>%
+          dplyr::mutate(topic_display = topic_label)
+      } else {
+        gamma_terms <- gamma_terms %>%
+          dplyr::mutate(topic_display = topic)
+      }
+    } else {
+      gamma_terms <- gamma_terms %>%
+        dplyr::mutate(topic_display = paste("Topic", topic))
+    }
+
+    if ("tt" %in% names(gamma_terms)) {
+      gamma_terms <- gamma_terms %>%
+        dplyr::arrange(tt) %>%
+        dplyr::mutate(topic_display = factor(topic_display, levels = unique(topic_display)))
+    } else {
+      gamma_terms <- gamma_terms %>%
+        dplyr::mutate(topic_display = factor(topic_display, levels = unique(topic_display)))
+    }
+
+    hover_text <- if ("terms" %in% names(gamma_terms)) {
+      paste0("Topic: ", gamma_terms$topic_display, "<br>Terms: ", gamma_terms$terms, "<br>Gamma: ", sprintf("%.3f", gamma_terms$gamma))
+    } else {
+      paste0("Topic: ", gamma_terms$topic_display, "<br>Gamma: ", sprintf("%.3f", gamma_terms$gamma))
+    }
+
+    ggplot_obj <- ggplot2::ggplot(gamma_terms, ggplot2::aes(x = topic_display, y = gamma, fill = topic_display,
+                                          text = hover_text)) +
+      ggplot2::geom_col(alpha = 0.8) +
+      ggplot2::coord_flip() +
+      ggplot2::scale_y_continuous(labels = .number_labeller(2)) +
+      ggplot2::xlab("") +
+      ggplot2::ylab(ylab) +
+      ggplot2::theme_minimal(base_size = base_font_size) +
+      ggplot2::theme(
+        legend.position = "none",
+        panel.grid.major = ggplot2::element_blank(),
+        panel.grid.minor = ggplot2::element_blank(),
+        axis.line = ggplot2::element_line(color = "#3B3B3B", linewidth = 0.3),
+        axis.ticks = ggplot2::element_line(color = "#3B3B3B", linewidth = 0.3),
+        strip.text.x = ggplot2::element_text(size = base_font_size, color = "#0c1f4a"),
+        axis.text.x = ggplot2::element_text(size = base_font_size, color = "#3B3B3B"),
+        axis.text.y = ggplot2::element_text(size = base_font_size, color = "#3B3B3B"),
+        axis.title = ggplot2::element_text(size = base_font_size, color = "#0c1f4a"),
+        axis.title.x = ggplot2::element_text(margin = ggplot2::margin(t = 10)),
+        axis.title.y = ggplot2::element_text(margin = ggplot2::margin(r = 10))
+      )
+
+    if (!is.null(colors)) {
+      ggplot_obj <- ggplot_obj + ggplot2::scale_fill_manual(values = colors)
+    }
+
+    ggplot_obj
+}
+
+
+#' @title Plot Topic Effects for Categorical Variables
+#'
+#' @description
+#' Creates a faceted plot showing how categorical variables affect topic proportions.
+#'
+#' @param effects_data Data frame with columns: topic, value, proportion, lower, upper
+#' @param ncol Number of columns for faceting (default: 2)
+#' @param height Plot height in pixels (default: 800)
+#' @param width Plot width in pixels (default: 1000)
+#' @param title Plot title (default: "Category Effects")
+#' @param base_font_size Base font size in points for the plot theme (default: 11). Axis text and strip text will be base_font_size + 2.
+#'
+#' @return A plotly object
+#'
+#' @concept topic-modeling
+#' @export
+plot_topic_effects_categorical <- function(effects_data,
+                                           ncol = 2,
+                                           height = 800,
+                                           width = 1000,
+                                           title = "Category Effects",
+                                           base_font_size = 11) {
+
+  if (is.null(effects_data) || nrow(effects_data) == 0) {
+    return(ggplot2::ggplot() +
+      ggplot2::annotate("text", x = 0.5, y = 0.5,
+        label = "No categorical effects available.\nPlease run the effect estimation first.",
+        size = 5, color = "#ef4444") +
+      ggplot2::theme_void())
+  }
+
+  effects_data <- effects_data %>%
+    dplyr::mutate(topic_label = paste("Topic", topic))
+
+  effects_data$hover_text <- paste("Topic:", effects_data$topic_label,
+                                   "<br>Value:", effects_data$value,
+                                   "<br>Proportion:", sprintf("%.3f", effects_data$proportion),
+                                   "<br>95% CI:", sprintf("[%.3f, %.3f]", effects_data$lower, effects_data$upper))
+
+  ggplot_obj <- ggplot2::ggplot(effects_data, ggplot2::aes(x = value, y = proportion, text = hover_text)) +
+    ggplot2::facet_wrap(~topic_label, ncol = ncol, scales = "free") +
+    ggplot2::scale_y_continuous(labels = .number_labeller(3)) +
+    ggplot2::xlab("") +
+    ggplot2::ylab("Topic proportion") +
+    ggplot2::geom_errorbar(
+      ggplot2::aes(ymin = lower, ymax = upper),
+      width = 0.1,
+      linewidth = 0.5,
+      color = "#337ab7"
+    ) +
+    ggplot2::geom_point(color = "#337ab7", size = 1.5) +
+    ggplot2::theme_minimal(base_size = base_font_size) +
+    ggplot2::theme(
+      legend.position = "none",
+      panel.grid.major = ggplot2::element_blank(),
+      panel.grid.minor = ggplot2::element_blank(),
+      axis.line = ggplot2::element_line(color = "#3B3B3B", linewidth = 0.3),
+      axis.ticks = ggplot2::element_line(color = "#3B3B3B", linewidth = 0.3),
+      strip.text.x = ggplot2::element_text(size = base_font_size, color = "#0c1f4a", margin = ggplot2::margin(b = 30, t = 15)),
+      axis.text.x = ggplot2::element_text(size = base_font_size, color = "#3B3B3B", hjust = 1, margin = ggplot2::margin(t = 20)),
+      axis.text.y = ggplot2::element_text(size = base_font_size, color = "#3B3B3B", margin = ggplot2::margin(r = 20)),
+      axis.title = ggplot2::element_text(size = base_font_size, color = "#0c1f4a"),
+      axis.title.x = ggplot2::element_text(margin = ggplot2::margin(t = 25)),
+      axis.title.y = ggplot2::element_text(margin = ggplot2::margin(r = 25)),
+      plot.margin = ggplot2::margin(t = 40, b = 40)
+    )
+
+  ggplot_obj +
+    ggplot2::ggtitle(title) +
+    ggplot2::theme(plot.title = ggplot2::element_text(
+      size = base_font_size + 2, color = "#0c1f4a", hjust = 0.5))
+}
+
+
+#' @title Plot Topic Effects for Continuous Variables
+#'
+#' @description
+#' Creates a faceted plot showing how continuous variables affect topic proportions.
+#'
+#' @param effects_data Data frame with columns: topic, value, proportion, lower, upper
+#' @param ncol Number of columns for faceting (default: 2)
+#' @param height Plot height in pixels (default: 800)
+#' @param width Plot width in pixels (default: 1000)
+#' @param title Plot title (default: "Continuous Variable Effects")
+#' @param base_font_size Base font size in points for the plot theme (default: 11). Axis text and strip text will be base_font_size + 2.
+#'
+#' @return A plotly object
+#'
+#' @concept topic-modeling
+#' @export
+plot_topic_effects_continuous <- function(effects_data,
+                                          ncol = 2,
+                                          height = 800,
+                                          width = 1000,
+                                          title = "Continuous Variable Effects",
+                                          base_font_size = 11) {
+
+  effects_data <- effects_data %>%
+    dplyr::mutate(topic_label = paste("Topic", topic))
+
+  effects_data$hover_text <- paste("Topic:", effects_data$topic_label,
+                                   "<br>Value:", round(effects_data$value, 3),
+                                   "<br>Proportion:", sprintf("%.3f", effects_data$proportion))
+
+  ggplot_obj <- ggplot2::ggplot(effects_data, ggplot2::aes(x = value, y = proportion, text = hover_text)) +
+    ggplot2::facet_wrap(~topic_label, ncol = ncol, scales = "free") +
+    ggplot2::scale_y_continuous(labels = .number_labeller(3)) +
+    ggplot2::geom_ribbon(ggplot2::aes(ymin = lower, ymax = upper), fill = "#337ab7", alpha = 0.2) +
+    ggplot2::geom_line(linewidth = 0.5, color = "#337ab7") +
+    ggplot2::xlab("") +
+    ggplot2::ylab("Topic proportion") +
+    ggplot2::theme_minimal(base_size = base_font_size) +
+    ggplot2::theme(
+      legend.position = "none",
+      panel.grid.major = ggplot2::element_blank(),
+      panel.grid.minor = ggplot2::element_blank(),
+      axis.line = ggplot2::element_line(color = "#3B3B3B", linewidth = 0.3),
+      axis.ticks = ggplot2::element_line(color = "#3B3B3B", linewidth = 0.3),
+      strip.text.x = ggplot2::element_text(size = base_font_size, color = "#0c1f4a", margin = ggplot2::margin(b = 30, t = 15)),
+      axis.text.x = ggplot2::element_text(size = base_font_size, color = "#3B3B3B", hjust = 1, margin = ggplot2::margin(t = 20)),
+      axis.text.y = ggplot2::element_text(size = base_font_size, color = "#3B3B3B", margin = ggplot2::margin(r = 20)),
+      axis.title = ggplot2::element_text(size = base_font_size, color = "#0c1f4a"),
+      axis.title.x = ggplot2::element_text(margin = ggplot2::margin(t = 25)),
+      axis.title.y = ggplot2::element_text(margin = ggplot2::margin(r = 25)),
+      plot.margin = ggplot2::margin(t = 40, b = 40)
+    )
+
+  ggplot_obj +
+    ggplot2::ggtitle(title) +
+    ggplot2::theme(plot.title = ggplot2::element_text(
+      size = base_font_size + 2, color = "#0c1f4a", hjust = 0.5))
+}
+
+
+
+#' Plot Cluster Top Terms
+#'
+#' @description
+#' Creates a horizontal bar plot showing the top terms in a cluster or document group.
+#'
+#' @param terms Named numeric vector of term frequencies, or data frame with
+#'   'term' and 'frequency' columns
+#' @param cluster_id Cluster identifier for the title (default: NULL)
+#' @param title Custom title (default: NULL, auto-generated from cluster_id)
+#' @param n_terms Number of top terms to display (default: 10)
+#' @param color Bar color (default: "#337ab7")
+#' @param height Plot height in pixels (default: 500)
+#' @param width Plot width in pixels (default: NULL for auto)
+#'
+#' @return A plotly object
+#'
+#' @concept visualization
+#' @export
+plot_cluster_terms <- function(terms,
+                                cluster_id = NULL,
+                                title = NULL,
+                                n_terms = 10,
+                                color = "#337ab7",
+                                height = 500,
+                                width = NULL) {
+
+  if (is.null(terms) || length(terms) == 0) {
+    return(ggplot2::ggplot() +
+      ggplot2::annotate("text", x = 0.5, y = 0.5,
+        label = "No terms available for this cluster",
+        size = 5, color = "#ef4444") +
+      ggplot2::theme_void())
+  }
+
+  if (is.data.frame(terms)) {
+    if (!all(c("term", "frequency") %in% names(terms))) {
+      stop("Data frame must have 'term' and 'frequency' columns")
+    }
+    terms <- terms %>%
+      dplyr::arrange(dplyr::desc(frequency)) %>%
+      dplyr::slice_head(n = n_terms)
+    term_names <- terms$term
+    term_values <- terms$frequency
+  } else {
+    top_terms <- utils::head(sort(terms, decreasing = TRUE), n_terms)
+    term_names <- names(top_terms)
+    term_values <- as.numeric(top_terms)
+  }
+
+  if (is.null(title)) {
+    title <- if (!is.null(cluster_id)) {
+      paste("Top Terms in Cluster", cluster_id)
+    } else {
+      "Top Terms"
+    }
+  }
+
+  plot_df <- data.frame(
+    term = factor(term_names, levels = term_names[order(term_values)]),
+    frequency = term_values
+  )
+
+  plot_df$hover_text <- paste("Term:", plot_df$term, "<br>Frequency:", plot_df$frequency)
+
+  ggplot2::ggplot(plot_df, ggplot2::aes(x = frequency, y = term, text = hover_text)) +
+    ggplot2::geom_col(fill = color) +
+    ggplot2::labs(x = "Frequency", y = NULL, title = title) +
+    ggplot2::theme_minimal(base_size = 11) +
+    ggplot2::theme(
+      plot.title = ggplot2::element_text(size = 13, color = "#0c1f4a", hjust = 0.5),
+      axis.text = ggplot2::element_text(size = 11, color = "#3B3B3B"),
+      axis.title = ggplot2::element_text(size = 12, color = "#0c1f4a"),
+      panel.grid.minor = ggplot2::element_blank(),
+      panel.grid.major.y = ggplot2::element_blank()
+    )
+}
+
+
+# Topic-based content generation
+
+#' Get Default System Prompt for Content Type
+#'
+#' Returns the default system prompt for a given content type.
+#'
+#' @param content_type Type of content to generate.
+#'
+#' @return Character string with the system prompt.
+#'
+#' @concept ai
+#' @export
+get_content_type_prompt <- function(content_type) {
+  prompts <- list(
+    survey_item = "
+You are a survey design expert specializing in creating Likert-scale items for research.
+Your task is to generate clear, concise survey statements that can be rated on a 5-point scale (1=Strongly Disagree to 5=Strongly Agree).
+
+Guidelines:
+1. Create statements focused on a single concept
+2. Use active voice and present tense
+3. Avoid double-barreled questions
+4. Use simple, direct language
+5. Ensure items work well on an agree-disagree scale
+6. Frame items to capture the essence of the provided keywords
+
+Return ONLY the survey item text, without numbering, quotes, or explanations.",
+
+    research_question = "
+You are a research methodology expert specializing in formulating research questions.
+Your task is to generate clear, focused research questions based on topic keywords.
+
+Guidelines:
+1. Create questions that are specific and answerable
+2. Use appropriate question words (How, What, Why, To what extent)
+3. Ensure questions are neither too broad nor too narrow
+4. Frame questions to guide empirical investigation
+5. Avoid yes/no questions - aim for open-ended inquiry
+
+Return ONLY the research question, without numbering, quotes, or explanations.",
+
+    theme_description = "
+You are a qualitative research expert specializing in thematic analysis.
+Your task is to generate descriptive summaries of themes based on topic keywords.
+
+Guidelines:
+1. Write in third person, academic style
+2. Describe what the theme encompasses
+3. Use language like 'This theme captures...', 'Participants discussed...'
+4. Be concise but complete
+5. Avoid interpretation - focus on description
+
+Return ONLY the theme description, without numbering, quotes, or explanations.",
+
+    policy_recommendation = "
+You are a policy analysis expert specializing in evidence-based recommendations.
+Your task is to generate actionable policy recommendations based on topic keywords.
+
+Guidelines:
+1. Begin with action verbs (Implement, Establish, Develop, Ensure)
+2. Be specific and actionable
+3. Consider feasibility and impact
+4. Use clear, professional language
+5. Focus on one recommendation per topic
+
+Return ONLY the policy recommendation, without numbering, quotes, or explanations.",
+
+    interview_question = "
+You are a qualitative research expert specializing in interview methodology.
+Your task is to generate open-ended interview questions based on topic keywords.
+
+Guidelines:
+1. Create questions that encourage detailed responses
+2. Use open-ended phrasing (Can you describe..., Tell me about..., How do you...)
+3. Avoid leading or biased questions
+4. Make questions conversational yet focused
+5. Ensure questions are appropriate for semi-structured interviews
+
+Return ONLY the interview question, without numbering, quotes, or explanations.",
+
+    custom = "
+You are an expert content generator.
+Your task is to generate content based on the provided keywords.
+
+Return ONLY the requested content, without numbering, quotes, or explanations."
+  )
+
+  prompts[[content_type]] %||% prompts[["custom"]]
+}
+
+
+#' Get Default User Prompt Template for Content Type
+#'
+#' Returns the default user prompt template for a given content type.
+#'
+#' @param content_type Type of content to generate.
+#'
+#' @return Character string with the user prompt template containing \code{\{terms\}} placeholder.
+#'
+#' @concept ai
+#' @export
+get_content_type_user_template <- function(content_type) {
+  templates <- list(
+    survey_item = "Generate a single survey item based on these keywords (ordered by importance): {terms}
+
+The survey item should:
+- Capture the main concept from these keywords
+- Be rateable on a 5-point Likert scale
+- Be clear and concise
+
+Survey item:",
+
+    research_question = "Generate a research question based on these keywords (ordered by importance): {terms}
+
+The research question should:
+- Be specific and empirically answerable
+- Capture the key concepts from these keywords
+- Guide meaningful investigation
+
+Research question:",
+
+    theme_description = "Generate a theme description based on these keywords (ordered by importance): {terms}
+
+The theme description should:
+- Summarize what this theme encompasses
+- Be written in academic style
+- Capture the essence of the keywords
+
+Theme description:",
+
+    policy_recommendation = "Generate a policy recommendation based on these keywords (ordered by importance): {terms}
+
+The recommendation should:
+- Be specific and actionable
+- Address the key concepts from these keywords
+- Be feasible to implement
+
+Policy recommendation:",
+
+    interview_question = "Generate an interview question based on these keywords (ordered by importance): {terms}
+
+The interview question should:
+- Be open-ended and encourage detailed responses
+- Explore the concepts represented by these keywords
+- Be appropriate for a semi-structured interview
+
+Interview question:",
+
+    custom = "Generate content based on these keywords (ordered by importance): {terms}
+
+Content:"
+  )
+
+  templates[[content_type]] %||% templates[["custom"]]
+}
+
+
+#' Generate Content from Topic Terms
+#'
+#' Uses Large Language Models (LLMs) to generate various types of content
+#' based on topic model terms. Supports multiple content types with optimized
+#' default prompts, or fully custom prompts.
+#'
+#' @param topic_terms_df A data frame with topic terms, containing columns for
+#'   topic identifier, term, and optionally term weight (beta).
+#' @param content_type Type of content to generate. One of:
+#'   \describe{
+#'     \item{"survey_item"}{Likert-scale survey items for scale development}
+#'     \item{"research_question"}{Research questions for literature review}
+#'     \item{"theme_description"}{Theme descriptions for qualitative analysis}
+#'     \item{"policy_recommendation"}{Policy recommendations for policy analysis}
+#'     \item{"interview_question"}{Interview questions for qualitative research}
+#'     \item{"custom"}{Custom content using user-provided prompts}
+#'   }
+#' @param topic_var Name of the column containing topic identifiers (default: "topic").
+#' @param term_var Name of the column containing terms (default: "term").
+#' @param weight_var Name of the column containing term weights (default: "beta").
+#' @param provider LLM provider: "openai" or "gemini" (default: "openai").
+#' @param model Model name. For OpenAI: "gpt-4.1-mini", "gpt-4", etc.
+#'   For Gemini: "gemini-2.5-flash-lite", "gemini-2.5-flash", etc.
+#' @param temperature Sampling temperature (0-2). Lower = more deterministic (default: 0).
+#' @param system_prompt Custom system prompt. If NULL, uses default for content_type.
+#' @param user_prompt_template Custom user prompt template with \{terms\} placeholder.
+#'   If NULL, uses default for content_type.
+#' @param max_tokens Maximum tokens for response (default: 150).
+#' @param api_key API key for the selected provider. If NULL, reads from
+#'   OPENAI_API_KEY or GEMINI_API_KEY environment variable.
+#' @param output_var Name of the output column (default: based on content_type).
+#' @param verbose Logical, if TRUE, prints progress messages.
+#'
+#' @return A data frame with generated content joined to original topic terms.
+#'
+#' @details
+#' The function generates one piece of content per unique topic. Each content type
+#' has optimized default prompts, but these can be overridden with custom prompts.
+#'
+#' Requires an API key set via the \code{api_key} parameter or the relevant
+#' environment variable (OPENAI_API_KEY or GEMINI_API_KEY).
+#'
+#' @concept ai
+#' @seealso [generate_topic_labels()] for the step that creates topic labels; [get_content_type_prompt()] and [get_content_type_user_template()] to inspect or override default prompts
+#' @export
+#'
+#' @examples
+#' if (interactive()) {
+#' # Generate survey items
+#' survey_items <- generate_topic_content(
+#'   topic_terms_df = top_terms,
+#'   content_type = "survey_item",
+#'   provider = "openai",
+#'   model = "gpt-4.1-mini"
+#' )
+#'
+#' # Generate research questions
+#' research_qs <- generate_topic_content(
+#'   topic_terms_df = top_terms,
+#'   content_type = "research_question",
+#'   provider = "gemini",
+#'   model = "gemini-2.5-flash-lite"
+#' )
+#'
+#' # Generate with custom prompt
+#' custom_content <- generate_topic_content(
+#'   topic_terms_df = top_terms,
+#'   content_type = "custom",
+#'   system_prompt = "You are an expert in educational policy...",
+#'   user_prompt_template = "Based on {terms}, generate a learning objective:"
+#' )
+#' }
+generate_topic_content <- function(topic_terms_df,
+                                    content_type = c("survey_item", "research_question",
+                                                     "theme_description", "policy_recommendation",
+                                                     "interview_question", "custom"),
+                                    topic_var = "topic",
+                                    term_var = "term",
+                                    weight_var = "beta",
+                                    provider = c("openai", "gemini"),
+                                    model = "gpt-4.1-mini",
+                                    temperature = 0,
+                                    system_prompt = NULL,
+                                    user_prompt_template = NULL,
+                                    max_tokens = 150,
+                                    api_key = NULL,
+                                    output_var = NULL,
+                                    verbose = TRUE) {
+
+  content_type <- match.arg(content_type)
+  provider <- match.arg(provider)
+
+  if (!topic_var %in% names(topic_terms_df)) {
+    stop("topic_var '", topic_var, "' not found in topic_terms_df")
+  }
+  if (!term_var %in% names(topic_terms_df)) {
+    stop("term_var '", term_var, "' not found in topic_terms_df")
+  }
+
+  # Set default output variable name based on content type
+  if (is.null(output_var)) {
+    output_var <- switch(content_type,
+      "survey_item" = "survey_item",
+      "research_question" = "research_question",
+      "theme_description" = "theme_description",
+      "policy_recommendation" = "policy_recommendation",
+      "interview_question" = "interview_question",
+      "custom" = "generated_content"
+    )
+  }
+
+  # Get default prompts if not provided
+  if (is.null(system_prompt)) {
+    system_prompt <- get_content_type_prompt(content_type)
+  }
+  if (is.null(user_prompt_template)) {
+    user_prompt_template <- get_content_type_user_template(content_type)
+  }
+
+  # Prepare topic data
+  has_weights <- weight_var %in% names(topic_terms_df)
+
+  if (has_weights) {
+    top_terms <- topic_terms_df %>%
+      dplyr::group_by(.data[[topic_var]]) %>%
+      dplyr::arrange(dplyr::desc(.data[[weight_var]])) %>%
+      dplyr::ungroup()
+  } else {
+    top_terms <- topic_terms_df %>%
+      dplyr::group_by(.data[[topic_var]]) %>%
+      dplyr::ungroup()
+  }
+
+  unique_topics <- top_terms %>%
+    dplyr::distinct(.data[[topic_var]]) %>%
+    dplyr::arrange(.data[[topic_var]])
+
+  unique_topics[[output_var]] <- NA_character_
+
+  if (is.null(api_key)) {
+    env_var <- switch(provider, "openai" = "OPENAI_API_KEY", "gemini" = "GEMINI_API_KEY")
+    api_key <- Sys.getenv(env_var)
+    if (api_key == "") {
+      return(.notify_missing_api_key(provider))
+    }
+  }
+
+  # Progress bar
+  if (verbose && requireNamespace("progress", quietly = TRUE)) {
+    pb <- progress::progress_bar$new(
+      format = paste0(" Generating ", content_type, "s [:bar] :percent (:current/:total) ETA: :eta"),
+      total = nrow(unique_topics),
+      clear = FALSE, width = 60
+    )
+  }
+
+  for (i in seq_len(nrow(unique_topics))) {
+    if (verbose && exists("pb")) {
+      pb$tick()
+    }
+
+    current_topic <- unique_topics[[topic_var]][i]
+
+    # Get terms for this topic
+    topic_data <- top_terms %>%
+      dplyr::filter(.data[[topic_var]] == current_topic)
+
+    terms_text <- paste(topic_data[[term_var]], collapse = ", ")
+
+    # Create user prompt
+    user_prompt <- gsub("\\{terms\\}", terms_text, user_prompt_template)
+
+    generated_content <- tryCatch(
+      call_llm_api(
+        provider = provider,
+        system_prompt = system_prompt,
+        user_prompt = user_prompt,
+        model = model,
+        temperature = temperature,
+        max_tokens = max_tokens,
+        api_key = api_key
+      ),
+      error = function(e) {
+        if (verbose) {
+          warning(sprintf("Error generating content for topic %s: %s", current_topic, e$message))
+        }
+        NA_character_
+      }
+    )
+
+    # Clean up response
+    if (!is.na(generated_content)) {
+      generated_content <- trimws(generated_content)
+      generated_content <- gsub("^[\"'](.*)[\"']$", "\\1", generated_content)
+    }
+
+    unique_topics[[output_var]][i] <- generated_content
+
+    Sys.sleep(0.5)
+  }
+
+  # Join generated content back to original data
+  result <- top_terms %>%
+    dplyr::left_join(
+      unique_topics %>% dplyr::select(dplyr::all_of(c(topic_var, output_var))),
+      by = topic_var
+    )
+
+  if (verbose) {
+    n_generated <- sum(!is.na(unique_topics[[output_var]]))
+    message(sprintf("Generated %d/%d %ss", n_generated, nrow(unique_topics), content_type))
+  }
+
+  result
+}

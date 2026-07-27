@@ -1,0 +1,68 @@
+---
+title: "Installation"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Installation}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(message = FALSE, warning = FALSE)
+```
+
+```{r}
+library(TextAnalysisR)
+packageVersion("TextAnalysisR")
+
+data("SpecialEduTech")
+nrow(SpecialEduTech)
+head(SpecialEduTech[, c("title", "year")], 3)
+```
+
+## Choose a Setup
+
+| Goal | Setup |
+|------|-------|
+| Small datasets in the browser | Web app at [textanalysisr.org](https://www.textanalysisr.org) |
+| Full analyses and large datasets | `install.packages()` below |
+| spaCy annotation and local transformer models | `setup_python_env()` after installing |
+
+Python is optional. Core analyses run in plain R; cloud AI providers
+(OpenAI, Gemini) can substitute for local models with an API key.
+
+## R Package
+
+```{r, eval = FALSE}
+install.packages("TextAnalysisR",
+  repos = c("https://mshin77.r-universe.dev", "https://cloud.r-project.org"))
+library(TextAnalysisR)
+run_app()
+```
+
+Requirements: R >= 4.0, RStudio recommended
+
+## Web App
+
+Visit [textanalysisr.org](https://www.textanalysisr.org) - no installation needed.
+
+Note: Web version has limited features (no Python, no large files). Cloud AI providers (OpenAI, Gemini) are available with an API key.
+
+## Optional Features
+
+### Linguistic Analysis (spaCy)
+
+For lemmatization, POS tagging, and named entity recognition, set up Python with `TextAnalysisR::setup_python_env()`.
+
+### Python Features
+
+For embeddings and neural sentiment analysis, run `setup_python_env()`. Requires Python 3.9+.
+
+## Troubleshooting
+
+| Issue | Solution |
+|-------|----------|
+| Package install failed | `remotes::install_github("mshin77/TextAnalysisR", dependencies = TRUE)` |
+| Browser doesn't open | Navigate to URL shown in R console |
+| Python errors | See [Python Environment](python_environment.html) |
+

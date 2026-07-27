@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+
+<html>
+
+<head>
+
+<meta charset="utf-8" />
+<meta name="generator" content="pandoc" />
+<meta http-equiv="X-UA-Compatible" content="IE=EDGE" />
+
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+
+
+
+<title>Accessibility</title>
+
+<script>// Pandoc 2.9 adds attributes on both header and div. We remove the former (to
+// be compatible with the behavior of Pandoc < 2.8).
+document.addEventListener('DOMContentLoaded', function(e) {
+  var hs = document.querySelectorAll("div.section[class*='level'] > :first-child");
+  var i, h, a;
+  for (i = 0; i < hs.length; i++) {
+    h = hs[i];
+    if (!/^h[1-6]$/i.test(h.tagName)) continue;  // it should be a header h1-h6
+    a = h.attributes;
+    while (a.length > 0) h.removeAttribute(a[0].name);
+  }
+});
+</script>
+
+<style type="text/css">
+code{white-space: pre-wrap;}
+span.smallcaps{font-variant: small-caps;}
+span.underline{text-decoration: underline;}
+div.column{display: inline-block; vertical-align: top; width: 50%;}
+div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+ul.task-list{list-style: none;}
+</style>
+
+
+
+<style type="text/css">
+code {
+white-space: pre;
+}
+.sourceCode {
+overflow: visible;
+}
+</style>
+<style type="text/css" data-origin="pandoc">
+html { -webkit-text-size-adjust: 100%; }
+pre > code.sourceCode { white-space: pre; position: relative; }
+pre > code.sourceCode > span { display: inline-block; line-height: 1.25; }
+pre > code.sourceCode > span:empty { height: 1.2em; }
+.sourceCode { overflow: visible; }
+code.sourceCode > span { color: inherit; text-decoration: inherit; }
+div.sourceCode { margin: 1em 0; }
+pre.sourceCode { margin: 0; }
+@media screen {
+div.sourceCode { overflow: auto; }
+}
+@media print {
+pre > code.sourceCode { white-space: pre-wrap; }
+pre > code.sourceCode > span { text-indent: -5em; padding-left: 5em; }
+}
+pre.numberSource code
+{ counter-reset: source-line 0; }
+pre.numberSource code > span
+{ position: relative; left: -4em; counter-increment: source-line; }
+pre.numberSource code > span > a:first-child::before
+{ content: counter(source-line);
+position: relative; left: -1em; text-align: right; vertical-align: baseline;
+border: none; display: inline-block;
+-webkit-touch-callout: none; -webkit-user-select: none;
+-khtml-user-select: none; -moz-user-select: none;
+-ms-user-select: none; user-select: none;
+padding: 0 4px; width: 4em;
+color: #aaaaaa;
+}
+pre.numberSource { margin-left: 3em; border-left: 1px solid #aaaaaa; padding-left: 4px; }
+div.sourceCode
+{ }
+@media screen {
+pre > code.sourceCode > span > a:first-child::before { text-decoration: underline; }
+}
+code span.al { color: #ff0000; font-weight: bold; } 
+code span.an { color: #60a0b0; font-weight: bold; font-style: italic; } 
+code span.at { color: #7d9029; } 
+code span.bn { color: #40a070; } 
+code span.bu { color: #008000; } 
+code span.cf { color: #007020; font-weight: bold; } 
+code span.ch { color: #4070a0; } 
+code span.cn { color: #880000; } 
+code span.co { color: #60a0b0; font-style: italic; } 
+code span.cv { color: #60a0b0; font-weight: bold; font-style: italic; } 
+code span.do { color: #ba2121; font-style: italic; } 
+code span.dt { color: #902000; } 
+code span.dv { color: #40a070; } 
+code span.er { color: #ff0000; font-weight: bold; } 
+code span.ex { } 
+code span.fl { color: #40a070; } 
+code span.fu { color: #06287e; } 
+code span.im { color: #008000; font-weight: bold; } 
+code span.in { color: #60a0b0; font-weight: bold; font-style: italic; } 
+code span.kw { color: #007020; font-weight: bold; } 
+code span.op { color: #666666; } 
+code span.ot { color: #007020; } 
+code span.pp { color: #bc7a00; } 
+code span.sc { color: #4070a0; } 
+code span.ss { color: #bb6688; } 
+code span.st { color: #4070a0; } 
+code span.va { color: #19177c; } 
+code span.vs { color: #4070a0; } 
+code span.wa { color: #60a0b0; font-weight: bold; font-style: italic; } 
+</style>
+<script>
+// apply pandoc div.sourceCode style to pre.sourceCode instead
+(function() {
+  var sheets = document.styleSheets;
+  for (var i = 0; i < sheets.length; i++) {
+    if (sheets[i].ownerNode.dataset["origin"] !== "pandoc") continue;
+    try { var rules = sheets[i].cssRules; } catch (e) { continue; }
+    var j = 0;
+    while (j < rules.length) {
+      var rule = rules[j];
+      // check if there is a div.sourceCode rule
+      if (rule.type !== rule.STYLE_RULE || rule.selectorText !== "div.sourceCode") {
+        j++;
+        continue;
+      }
+      var style = rule.style.cssText;
+      // check if color or background-color is set
+      if (rule.style.color === '' && rule.style.backgroundColor === '') {
+        j++;
+        continue;
+      }
+      // replace div.sourceCode by a pre.sourceCode rule
+      sheets[i].deleteRule(j);
+      sheets[i].insertRule('pre.sourceCode{' + style + '}', j);
+    }
+  }
+})();
+</script>
+
+
+
+
+<style type="text/css">body {
+background-color: #fff;
+margin: 1em auto;
+max-width: 700px;
+overflow: visible;
+padding-left: 2em;
+padding-right: 2em;
+font-family: "Open Sans", "Helvetica Neue", Helvetica, Arial, sans-serif;
+font-size: 14px;
+line-height: 1.35;
+}
+#TOC {
+clear: both;
+margin: 0 0 10px 10px;
+padding: 4px;
+width: 400px;
+border: 1px solid #CCCCCC;
+border-radius: 5px;
+background-color: #f6f6f6;
+font-size: 13px;
+line-height: 1.3;
+}
+#TOC .toctitle {
+font-weight: bold;
+font-size: 15px;
+margin-left: 5px;
+}
+#TOC ul {
+padding-left: 40px;
+margin-left: -1.5em;
+margin-top: 5px;
+margin-bottom: 5px;
+}
+#TOC ul ul {
+margin-left: -2em;
+}
+#TOC li {
+line-height: 16px;
+}
+table {
+margin: 1em auto;
+border-width: 1px;
+border-color: #DDDDDD;
+border-style: outset;
+border-collapse: collapse;
+}
+table th {
+border-width: 2px;
+padding: 5px;
+border-style: inset;
+}
+table td {
+border-width: 1px;
+border-style: inset;
+line-height: 18px;
+padding: 5px 5px;
+}
+table, table th, table td {
+border-left-style: none;
+border-right-style: none;
+}
+table thead, table tr.even {
+background-color: #f7f7f7;
+}
+p {
+margin: 0.5em 0;
+}
+blockquote {
+background-color: #f6f6f6;
+padding: 0.25em 0.75em;
+}
+hr {
+border-style: solid;
+border: none;
+border-top: 1px solid #777;
+margin: 28px 0;
+}
+dl {
+margin-left: 0;
+}
+dl dd {
+margin-bottom: 13px;
+margin-left: 13px;
+}
+dl dt {
+font-weight: bold;
+}
+ul {
+margin-top: 0;
+}
+ul li {
+list-style: circle outside;
+}
+ul ul {
+margin-bottom: 0;
+}
+pre, code {
+background-color: #f7f7f7;
+border-radius: 3px;
+color: #333;
+white-space: pre-wrap; 
+}
+pre {
+border-radius: 3px;
+margin: 5px 0px 10px 0px;
+padding: 10px;
+}
+pre:not([class]) {
+background-color: #f7f7f7;
+}
+code {
+font-family: Consolas, Monaco, 'Courier New', monospace;
+font-size: 85%;
+}
+p > code, li > code {
+padding: 2px 0px;
+}
+div.figure {
+text-align: center;
+}
+img {
+background-color: #FFFFFF;
+padding: 2px;
+border: 1px solid #DDDDDD;
+border-radius: 3px;
+border: 1px solid #CCCCCC;
+margin: 0 5px;
+}
+h1 {
+margin-top: 0;
+font-size: 35px;
+line-height: 40px;
+}
+h2 {
+border-bottom: 4px solid #f7f7f7;
+padding-top: 10px;
+padding-bottom: 2px;
+font-size: 145%;
+}
+h3 {
+border-bottom: 2px solid #f7f7f7;
+padding-top: 10px;
+font-size: 120%;
+}
+h4 {
+border-bottom: 1px solid #f7f7f7;
+margin-left: 8px;
+font-size: 105%;
+}
+h5, h6 {
+border-bottom: 1px solid #ccc;
+font-size: 105%;
+}
+a {
+color: #0033dd;
+text-decoration: none;
+}
+a:hover {
+color: #6666ff; }
+a:visited {
+color: #800080; }
+a:visited:hover {
+color: #BB00BB; }
+a[href^="http:"] {
+text-decoration: underline; }
+a[href^="https:"] {
+text-decoration: underline; }
+
+code > span.kw { color: #555; font-weight: bold; } 
+code > span.dt { color: #902000; } 
+code > span.dv { color: #40a070; } 
+code > span.bn { color: #d14; } 
+code > span.fl { color: #d14; } 
+code > span.ch { color: #d14; } 
+code > span.st { color: #d14; } 
+code > span.co { color: #888888; font-style: italic; } 
+code > span.ot { color: #007020; } 
+code > span.al { color: #ff0000; font-weight: bold; } 
+code > span.fu { color: #900; font-weight: bold; } 
+code > span.er { color: #a61717; background-color: #e3d2d2; } 
+</style>
+
+
+
+
+</head>
+
+<body>
+
+
+
+
+<h1 class="title toc-ignore">Accessibility</h1>
+
+
+
+<div class="sourceCode" id="cb1"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb1-1"><a href="#cb1-1" tabindex="-1"></a><span class="fu">library</span>(TextAnalysisR)</span>
+<span id="cb1-2"><a href="#cb1-2" tabindex="-1"></a></span>
+<span id="cb1-3"><a href="#cb1-3" tabindex="-1"></a>mydata <span class="ot">&lt;-</span> SpecialEduTech[<span class="fu">seq_len</span>(<span class="dv">20</span>), <span class="fu">c</span>(<span class="st">&quot;title&quot;</span>, <span class="st">&quot;abstract&quot;</span>)]</span>
+<span id="cb1-4"><a href="#cb1-4" tabindex="-1"></a>united <span class="ot">&lt;-</span> <span class="fu">unite_cols</span>(mydata, <span class="at">listed_vars =</span> <span class="fu">c</span>(<span class="st">&quot;title&quot;</span>, <span class="st">&quot;abstract&quot;</span>))</span>
+<span id="cb1-5"><a href="#cb1-5" tabindex="-1"></a>toks   <span class="ot">&lt;-</span> <span class="fu">prep_texts</span>(united, <span class="at">text_field =</span> <span class="st">&quot;united_texts&quot;</span>)</span>
+<span id="cb1-6"><a href="#cb1-6" tabindex="-1"></a>dfm    <span class="ot">&lt;-</span> quanteda<span class="sc">::</span><span class="fu">dfm</span>(toks)</span>
+<span id="cb1-7"><a href="#cb1-7" tabindex="-1"></a><span class="fu">plot_word_frequency</span>(dfm, <span class="at">n =</span> <span class="dv">10</span>)</span></code></pre></div>
+<p><img role="img" src="data:image/png;base64,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" /><!-- --></p>
+<p>TextAnalysisR meets WCAG 2.1 Level AA standards.</p>
+<div id="keyboard-navigation" class="section level2">
+<h2>Keyboard Navigation</h2>
+<table>
+<thead>
+<tr class="header">
+<th>Key</th>
+<th>Action</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>Tab / Shift+Tab</td>
+<td>Move between elements</td>
+</tr>
+<tr class="even">
+<td>Enter / Space</td>
+<td>Activate buttons</td>
+</tr>
+<tr class="odd">
+<td>Esc</td>
+<td>Close dialogs</td>
+</tr>
+</tbody>
+</table>
+</div>
+<div id="visual-features" class="section level2">
+<h2>Visual Features</h2>
+<ul>
+<li>Dark mode toggle</li>
+<li>High contrast (4.5:1 ratio)</li>
+<li>200% zoom support</li>
+<li>Reduced motion option</li>
+</ul>
+</div>
+<div id="screen-reader-support" class="section level2">
+<h2>Screen Reader Support</h2>
+<ul>
+<li>Descriptive button labels</li>
+<li>Chart text descriptions</li>
+<li>Status announcements</li>
+</ul>
+</div>
+<div id="language-support" class="section level2">
+<h2>Language Support</h2>
+<ul>
+<li>100+ languages via Google Translate</li>
+<li>Auto-detected text-to-speech</li>
+</ul>
+</div>
+
+
+
+<!-- code folding -->
+
+
+<!-- dynamically load mathjax for compatibility with self-contained -->
+<script>
+  (function () {
+    var script = document.createElement("script");
+    script.type = "text/javascript";
+    script.src  = "https://mathjax.rstudio.com/latest/MathJax.js?config=TeX-AMS-MML_HTMLorMML";
+    document.getElementsByTagName("head")[0].appendChild(script);
+  })();
+</script>
+
+</body>
+</html>

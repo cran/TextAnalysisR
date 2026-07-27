@@ -1,0 +1,804 @@
+<!DOCTYPE html>
+
+<html>
+
+<head>
+
+<meta charset="utf-8" />
+<meta name="generator" content="pandoc" />
+<meta http-equiv="X-UA-Compatible" content="IE=EDGE" />
+
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+
+
+
+<title>Topic Modeling</title>
+
+<script>// Pandoc 2.9 adds attributes on both header and div. We remove the former (to
+// be compatible with the behavior of Pandoc < 2.8).
+document.addEventListener('DOMContentLoaded', function(e) {
+  var hs = document.querySelectorAll("div.section[class*='level'] > :first-child");
+  var i, h, a;
+  for (i = 0; i < hs.length; i++) {
+    h = hs[i];
+    if (!/^h[1-6]$/i.test(h.tagName)) continue;  // it should be a header h1-h6
+    a = h.attributes;
+    while (a.length > 0) h.removeAttribute(a[0].name);
+  }
+});
+</script>
+
+<style type="text/css">
+code{white-space: pre-wrap;}
+span.smallcaps{font-variant: small-caps;}
+span.underline{text-decoration: underline;}
+div.column{display: inline-block; vertical-align: top; width: 50%;}
+div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+ul.task-list{list-style: none;}
+</style>
+
+
+
+<style type="text/css">
+code {
+white-space: pre;
+}
+.sourceCode {
+overflow: visible;
+}
+</style>
+<style type="text/css" data-origin="pandoc">
+html { -webkit-text-size-adjust: 100%; }
+pre > code.sourceCode { white-space: pre; position: relative; }
+pre > code.sourceCode > span { display: inline-block; line-height: 1.25; }
+pre > code.sourceCode > span:empty { height: 1.2em; }
+.sourceCode { overflow: visible; }
+code.sourceCode > span { color: inherit; text-decoration: inherit; }
+div.sourceCode { margin: 1em 0; }
+pre.sourceCode { margin: 0; }
+@media screen {
+div.sourceCode { overflow: auto; }
+}
+@media print {
+pre > code.sourceCode { white-space: pre-wrap; }
+pre > code.sourceCode > span { text-indent: -5em; padding-left: 5em; }
+}
+pre.numberSource code
+{ counter-reset: source-line 0; }
+pre.numberSource code > span
+{ position: relative; left: -4em; counter-increment: source-line; }
+pre.numberSource code > span > a:first-child::before
+{ content: counter(source-line);
+position: relative; left: -1em; text-align: right; vertical-align: baseline;
+border: none; display: inline-block;
+-webkit-touch-callout: none; -webkit-user-select: none;
+-khtml-user-select: none; -moz-user-select: none;
+-ms-user-select: none; user-select: none;
+padding: 0 4px; width: 4em;
+color: #aaaaaa;
+}
+pre.numberSource { margin-left: 3em; border-left: 1px solid #aaaaaa; padding-left: 4px; }
+div.sourceCode
+{ }
+@media screen {
+pre > code.sourceCode > span > a:first-child::before { text-decoration: underline; }
+}
+code span.al { color: #ff0000; font-weight: bold; } 
+code span.an { color: #60a0b0; font-weight: bold; font-style: italic; } 
+code span.at { color: #7d9029; } 
+code span.bn { color: #40a070; } 
+code span.bu { color: #008000; } 
+code span.cf { color: #007020; font-weight: bold; } 
+code span.ch { color: #4070a0; } 
+code span.cn { color: #880000; } 
+code span.co { color: #60a0b0; font-style: italic; } 
+code span.cv { color: #60a0b0; font-weight: bold; font-style: italic; } 
+code span.do { color: #ba2121; font-style: italic; } 
+code span.dt { color: #902000; } 
+code span.dv { color: #40a070; } 
+code span.er { color: #ff0000; font-weight: bold; } 
+code span.ex { } 
+code span.fl { color: #40a070; } 
+code span.fu { color: #06287e; } 
+code span.im { color: #008000; font-weight: bold; } 
+code span.in { color: #60a0b0; font-weight: bold; font-style: italic; } 
+code span.kw { color: #007020; font-weight: bold; } 
+code span.op { color: #666666; } 
+code span.ot { color: #007020; } 
+code span.pp { color: #bc7a00; } 
+code span.sc { color: #4070a0; } 
+code span.ss { color: #bb6688; } 
+code span.st { color: #4070a0; } 
+code span.va { color: #19177c; } 
+code span.vs { color: #4070a0; } 
+code span.wa { color: #60a0b0; font-weight: bold; font-style: italic; } 
+</style>
+<script>
+// apply pandoc div.sourceCode style to pre.sourceCode instead
+(function() {
+  var sheets = document.styleSheets;
+  for (var i = 0; i < sheets.length; i++) {
+    if (sheets[i].ownerNode.dataset["origin"] !== "pandoc") continue;
+    try { var rules = sheets[i].cssRules; } catch (e) { continue; }
+    var j = 0;
+    while (j < rules.length) {
+      var rule = rules[j];
+      // check if there is a div.sourceCode rule
+      if (rule.type !== rule.STYLE_RULE || rule.selectorText !== "div.sourceCode") {
+        j++;
+        continue;
+      }
+      var style = rule.style.cssText;
+      // check if color or background-color is set
+      if (rule.style.color === '' && rule.style.backgroundColor === '') {
+        j++;
+        continue;
+      }
+      // replace div.sourceCode by a pre.sourceCode rule
+      sheets[i].deleteRule(j);
+      sheets[i].insertRule('pre.sourceCode{' + style + '}', j);
+    }
+  }
+})();
+</script>
+
+
+
+
+<style type="text/css">body {
+background-color: #fff;
+margin: 1em auto;
+max-width: 700px;
+overflow: visible;
+padding-left: 2em;
+padding-right: 2em;
+font-family: "Open Sans", "Helvetica Neue", Helvetica, Arial, sans-serif;
+font-size: 14px;
+line-height: 1.35;
+}
+#TOC {
+clear: both;
+margin: 0 0 10px 10px;
+padding: 4px;
+width: 400px;
+border: 1px solid #CCCCCC;
+border-radius: 5px;
+background-color: #f6f6f6;
+font-size: 13px;
+line-height: 1.3;
+}
+#TOC .toctitle {
+font-weight: bold;
+font-size: 15px;
+margin-left: 5px;
+}
+#TOC ul {
+padding-left: 40px;
+margin-left: -1.5em;
+margin-top: 5px;
+margin-bottom: 5px;
+}
+#TOC ul ul {
+margin-left: -2em;
+}
+#TOC li {
+line-height: 16px;
+}
+table {
+margin: 1em auto;
+border-width: 1px;
+border-color: #DDDDDD;
+border-style: outset;
+border-collapse: collapse;
+}
+table th {
+border-width: 2px;
+padding: 5px;
+border-style: inset;
+}
+table td {
+border-width: 1px;
+border-style: inset;
+line-height: 18px;
+padding: 5px 5px;
+}
+table, table th, table td {
+border-left-style: none;
+border-right-style: none;
+}
+table thead, table tr.even {
+background-color: #f7f7f7;
+}
+p {
+margin: 0.5em 0;
+}
+blockquote {
+background-color: #f6f6f6;
+padding: 0.25em 0.75em;
+}
+hr {
+border-style: solid;
+border: none;
+border-top: 1px solid #777;
+margin: 28px 0;
+}
+dl {
+margin-left: 0;
+}
+dl dd {
+margin-bottom: 13px;
+margin-left: 13px;
+}
+dl dt {
+font-weight: bold;
+}
+ul {
+margin-top: 0;
+}
+ul li {
+list-style: circle outside;
+}
+ul ul {
+margin-bottom: 0;
+}
+pre, code {
+background-color: #f7f7f7;
+border-radius: 3px;
+color: #333;
+white-space: pre-wrap; 
+}
+pre {
+border-radius: 3px;
+margin: 5px 0px 10px 0px;
+padding: 10px;
+}
+pre:not([class]) {
+background-color: #f7f7f7;
+}
+code {
+font-family: Consolas, Monaco, 'Courier New', monospace;
+font-size: 85%;
+}
+p > code, li > code {
+padding: 2px 0px;
+}
+div.figure {
+text-align: center;
+}
+img {
+background-color: #FFFFFF;
+padding: 2px;
+border: 1px solid #DDDDDD;
+border-radius: 3px;
+border: 1px solid #CCCCCC;
+margin: 0 5px;
+}
+h1 {
+margin-top: 0;
+font-size: 35px;
+line-height: 40px;
+}
+h2 {
+border-bottom: 4px solid #f7f7f7;
+padding-top: 10px;
+padding-bottom: 2px;
+font-size: 145%;
+}
+h3 {
+border-bottom: 2px solid #f7f7f7;
+padding-top: 10px;
+font-size: 120%;
+}
+h4 {
+border-bottom: 1px solid #f7f7f7;
+margin-left: 8px;
+font-size: 105%;
+}
+h5, h6 {
+border-bottom: 1px solid #ccc;
+font-size: 105%;
+}
+a {
+color: #0033dd;
+text-decoration: none;
+}
+a:hover {
+color: #6666ff; }
+a:visited {
+color: #800080; }
+a:visited:hover {
+color: #BB00BB; }
+a[href^="http:"] {
+text-decoration: underline; }
+a[href^="https:"] {
+text-decoration: underline; }
+
+code > span.kw { color: #555; font-weight: bold; } 
+code > span.dt { color: #902000; } 
+code > span.dv { color: #40a070; } 
+code > span.bn { color: #d14; } 
+code > span.fl { color: #d14; } 
+code > span.ch { color: #d14; } 
+code > span.st { color: #d14; } 
+code > span.co { color: #888888; font-style: italic; } 
+code > span.ot { color: #007020; } 
+code > span.al { color: #ff0000; font-weight: bold; } 
+code > span.fu { color: #900; font-weight: bold; } 
+code > span.er { color: #a61717; background-color: #e3d2d2; } 
+</style>
+
+
+
+
+</head>
+
+<body>
+
+
+
+
+<h1 class="title toc-ignore">Topic Modeling</h1>
+
+
+
+<p>Topic modeling discovers latent themes in a text collection. The
+Shiny app offers two types:</p>
+<ul>
+<li><strong>Structural Topic Model (STM):</strong> word-probability
+topics that incorporate document metadata as covariates. Runs in R.</li>
+<li><strong>Embedding-based topics:</strong> transformer embeddings
+reduced and clustered into topics. Best for short texts and multilingual
+content. Requires Python (BERTopic) or an embedding API key.</li>
+</ul>
+<p>The sections below follow the app’s <strong>Topic Modeling</strong>
+tabs in order, first with STM (run live on the bundled data) and then
+with the embedding-based type.</p>
+<div id="setup" class="section level2">
+<h2>Setup</h2>
+<p>A 150-document subset of <code>SpecialEduTech</code> keeps the build
+fast; the full dataset works the same way.</p>
+<div class="sourceCode" id="cb1"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb1-1"><a href="#cb1-1" tabindex="-1"></a><span class="fu">library</span>(TextAnalysisR)</span>
+<span id="cb1-2"><a href="#cb1-2" tabindex="-1"></a></span>
+<span id="cb1-3"><a href="#cb1-3" tabindex="-1"></a>mydata <span class="ot">&lt;-</span> SpecialEduTech[<span class="dv">1</span><span class="sc">:</span><span class="dv">150</span>, ]</span>
+<span id="cb1-4"><a href="#cb1-4" tabindex="-1"></a>united_tbl <span class="ot">&lt;-</span> <span class="fu">unite_cols</span>(mydata, <span class="at">listed_vars =</span> <span class="fu">c</span>(<span class="st">&quot;title&quot;</span>, <span class="st">&quot;keyword&quot;</span>, <span class="st">&quot;abstract&quot;</span>))</span>
+<span id="cb1-5"><a href="#cb1-5" tabindex="-1"></a>tokens <span class="ot">&lt;-</span> <span class="fu">prep_texts</span>(united_tbl, <span class="at">text_field =</span> <span class="st">&quot;united_texts&quot;</span>, <span class="at">remove_stopwords =</span> <span class="cn">TRUE</span>)</span>
+<span id="cb1-6"><a href="#cb1-6" tabindex="-1"></a>dfm_object <span class="ot">&lt;-</span> quanteda<span class="sc">::</span><span class="fu">dfm</span>(tokens)</span></code></pre></div>
+</div>
+<div id="model-configuration" class="section level2">
+<h2>Model Configuration</h2>
+<p><code>find_optimal_k()</code> compares models across a range of K via
+<code>searchK</code> (semantic coherence, exclusivity, held-out
+likelihood, residuals). The example uses a small document subset and a
+narrow K range to keep the runtime short.</p>
+<div class="sourceCode" id="cb2"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb2-1"><a href="#cb2-1" tabindex="-1"></a>k_search <span class="ot">&lt;-</span> <span class="fu">find_optimal_k</span>(dfm_object, <span class="at">topic_range =</span> <span class="dv">5</span><span class="sc">:</span><span class="dv">6</span>)</span></code></pre></div>
+<pre><code>## Beginning Spectral Initialization 
+##   Calculating the gram matrix...
+##   Finding anchor words...
+##      .....
+##   Recovering initialization...
+##      ........................
+## Initialization complete.
+## ......................................................................................................................................................
+## Completed E-Step (0 seconds). 
+## Completed M-Step. 
+## Completing Iteration 1 (approx. per word bound = -6.394) 
+## ......................................................................................................................................................
+## Completed E-Step (0 seconds). 
+## Completed M-Step. 
+## Completing Iteration 2 (approx. per word bound = -6.062, relative change = 5.193e-02) 
+## ......................................................................................................................................................
+## Completed E-Step (0 seconds). 
+## Completed M-Step. 
+## Completing Iteration 3 (approx. per word bound = -6.004, relative change = 9.583e-03) 
+## ......................................................................................................................................................
+## Completed E-Step (0 seconds). 
+## Completed M-Step. 
+## Completing Iteration 4 (approx. per word bound = -5.994, relative change = 1.647e-03) 
+## ......................................................................................................................................................
+## Completed E-Step (0 seconds). 
+## Completed M-Step. 
+## Completing Iteration 5 (approx. per word bound = -5.991, relative change = 5.779e-04) 
+## Topic 1: learning, students, computer, instruction, assisted 
+##  Topic 2: mathematics, students, disabilities, technology, instruction 
+##  Topic 3: computer, instruction, students, assisted, problem 
+##  Topic 4: computer, software, learning, disabilities, students 
+##  Topic 5: students, education, disabilities, mathematics, learning 
+## ......................................................................................................................................................
+## Completed E-Step (0 seconds). 
+## Completed M-Step. 
+## Completing Iteration 6 (approx. per word bound = -5.989, relative change = 2.629e-04) 
+## ......................................................................................................................................................
+## Completed E-Step (0 seconds). 
+## Completed M-Step. 
+## Completing Iteration 7 (approx. per word bound = -5.988, relative change = 1.504e-04) 
+## ......................................................................................................................................................
+## Completed E-Step (0 seconds). 
+## Completed M-Step. 
+## Completing Iteration 8 (approx. per word bound = -5.988, relative change = 1.240e-04) 
+## ......................................................................................................................................................
+## Completed E-Step (0 seconds). 
+## Completed M-Step. 
+## Completing Iteration 9 (approx. per word bound = -5.987, relative change = 1.196e-04) 
+## ......................................................................................................................................................
+## Completed E-Step (0 seconds). 
+## Completed M-Step. 
+## Completing Iteration 10 (approx. per word bound = -5.986, relative change = 1.138e-04) 
+## Topic 1: learning, students, computer, instruction, assisted 
+##  Topic 2: mathematics, students, disabilities, technology, learning 
+##  Topic 3: computer, instruction, students, problem, assisted 
+##  Topic 4: computer, software, learning, disabilities, performance 
+##  Topic 5: students, education, disabilities, mathematics, learning 
+## ......................................................................................................................................................
+## Completed E-Step (0 seconds). 
+## Completed M-Step. 
+## Model Converged 
+## Beginning Spectral Initialization 
+##   Calculating the gram matrix...
+##   Finding anchor words...
+##      ......
+##   Recovering initialization...
+##      ........................
+## Initialization complete.
+## ......................................................................................................................................................
+## Completed E-Step (0 seconds). 
+## Completed M-Step. 
+## Completing Iteration 1 (approx. per word bound = -6.375) 
+## ......................................................................................................................................................
+## Completed E-Step (0 seconds). 
+## Completed M-Step. 
+## Completing Iteration 2 (approx. per word bound = -6.012, relative change = 5.693e-02) 
+## ......................................................................................................................................................
+## Completed E-Step (0 seconds). 
+## Completed M-Step. 
+## Completing Iteration 3 (approx. per word bound = -5.958, relative change = 9.010e-03) 
+## ......................................................................................................................................................
+## Completed E-Step (0 seconds). 
+## Completed M-Step. 
+## Completing Iteration 4 (approx. per word bound = -5.947, relative change = 1.754e-03) 
+## ......................................................................................................................................................
+## Completed E-Step (0 seconds). 
+## Completed M-Step. 
+## Completing Iteration 5 (approx. per word bound = -5.942, relative change = 9.227e-04) 
+## Topic 1: learning, students, computer, instruction, assisted 
+##  Topic 2: mathematics, students, technology, learning, disabilities 
+##  Topic 3: computer, instruction, assisted, students, problem 
+##  Topic 4: computer, software, learning, performance, mathematics 
+##  Topic 5: students, education, mathematics, disabilities, instruction 
+##  Topic 6: learning, disabilities, students, education, instruction 
+## ......................................................................................................................................................
+## Completed E-Step (0 seconds). 
+## Completed M-Step. 
+## Completing Iteration 6 (approx. per word bound = -5.939, relative change = 4.010e-04) 
+## ......................................................................................................................................................
+## Completed E-Step (0 seconds). 
+## Completed M-Step. 
+## Completing Iteration 7 (approx. per word bound = -5.938, relative change = 2.763e-04) 
+## ......................................................................................................................................................
+## Completed E-Step (0 seconds). 
+## Completed M-Step. 
+## Completing Iteration 8 (approx. per word bound = -5.936, relative change = 2.946e-04) 
+## ......................................................................................................................................................
+## Completed E-Step (0 seconds). 
+## Completed M-Step. 
+## Completing Iteration 9 (approx. per word bound = -5.935, relative change = 2.366e-04) 
+## ......................................................................................................................................................
+## Completed E-Step (0 seconds). 
+## Completed M-Step. 
+## Completing Iteration 10 (approx. per word bound = -5.934, relative change = 1.834e-04) 
+## Topic 1: learning, students, computer, instruction, assisted 
+##  Topic 2: mathematics, students, learning, technology, disabilities 
+##  Topic 3: computer, instruction, assisted, students, problem 
+##  Topic 4: computer, software, learning, performance, mathematics 
+##  Topic 5: students, education, mathematics, disabilities, instruction 
+##  Topic 6: learning, disabilities, students, education, instruction 
+## ......................................................................................................................................................
+## Completed E-Step (0 seconds). 
+## Completed M-Step. 
+## Completing Iteration 11 (approx. per word bound = -5.933, relative change = 1.842e-04) 
+## ......................................................................................................................................................
+## Completed E-Step (0 seconds). 
+## Completed M-Step. 
+## Completing Iteration 12 (approx. per word bound = -5.931, relative change = 2.650e-04) 
+## ......................................................................................................................................................
+## Completed E-Step (0 seconds). 
+## Completed M-Step. 
+## Completing Iteration 13 (approx. per word bound = -5.929, relative change = 3.131e-04) 
+## ......................................................................................................................................................
+## Completed E-Step (0 seconds). 
+## Completed M-Step. 
+## Completing Iteration 14 (approx. per word bound = -5.928, relative change = 1.304e-04) 
+## ......................................................................................................................................................
+## Completed E-Step (0 seconds). 
+## Completed M-Step. 
+## Completing Iteration 15 (approx. per word bound = -5.928, relative change = 1.326e-04) 
+## Topic 1: learning, students, computer, instruction, assisted 
+##  Topic 2: mathematics, students, learning, technology, computer 
+##  Topic 3: computer, instruction, assisted, students, problem 
+##  Topic 4: computer, software, performance, learning, mathematics 
+##  Topic 5: students, education, mathematics, disabilities, instruction 
+##  Topic 6: learning, disabilities, students, education, instruction 
+## ......................................................................................................................................................
+## Completed E-Step (0 seconds). 
+## Completed M-Step. 
+## Model Converged</code></pre>
+<div class="sourceCode" id="cb4"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb4-1"><a href="#cb4-1" tabindex="-1"></a><span class="fu">names</span>(k_search)</span></code></pre></div>
+<pre><code>## [1] &quot;results&quot;  &quot;call&quot;     &quot;settings&quot;</code></pre>
+<p>Fit a small STM for the examples below. <code>prevalence</code> makes
+topic proportions depend on document metadata.</p>
+<div class="sourceCode" id="cb6"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb6-1"><a href="#cb6-1" tabindex="-1"></a>out <span class="ot">&lt;-</span> quanteda<span class="sc">::</span><span class="fu">convert</span>(dfm_object, <span class="at">to =</span> <span class="st">&quot;stm&quot;</span>)</span>
+<span id="cb6-2"><a href="#cb6-2" tabindex="-1"></a>out<span class="sc">$</span>meta<span class="sc">$</span>year <span class="ot">&lt;-</span> <span class="fu">as.numeric</span>(out<span class="sc">$</span>meta<span class="sc">$</span>year)</span>
+<span id="cb6-3"><a href="#cb6-3" tabindex="-1"></a></span>
+<span id="cb6-4"><a href="#cb6-4" tabindex="-1"></a>model <span class="ot">&lt;-</span> stm<span class="sc">::</span><span class="fu">stm</span>(</span>
+<span id="cb6-5"><a href="#cb6-5" tabindex="-1"></a>  <span class="at">documents =</span> out<span class="sc">$</span>documents,</span>
+<span id="cb6-6"><a href="#cb6-6" tabindex="-1"></a>  <span class="at">vocab =</span> out<span class="sc">$</span>vocab,</span>
+<span id="cb6-7"><a href="#cb6-7" tabindex="-1"></a>  <span class="at">K =</span> <span class="dv">5</span>,</span>
+<span id="cb6-8"><a href="#cb6-8" tabindex="-1"></a>  <span class="at">prevalence =</span> <span class="sc">~</span> reference_type <span class="sc">+</span> year,</span>
+<span id="cb6-9"><a href="#cb6-9" tabindex="-1"></a>  <span class="at">data =</span> out<span class="sc">$</span>meta,</span>
+<span id="cb6-10"><a href="#cb6-10" tabindex="-1"></a>  <span class="at">max.em.its =</span> <span class="dv">15</span>,</span>
+<span id="cb6-11"><a href="#cb6-11" tabindex="-1"></a>  <span class="at">init.type =</span> <span class="st">&quot;Spectral&quot;</span>,</span>
+<span id="cb6-12"><a href="#cb6-12" tabindex="-1"></a>  <span class="at">verbose =</span> <span class="cn">FALSE</span></span>
+<span id="cb6-13"><a href="#cb6-13" tabindex="-1"></a>)</span></code></pre></div>
+<p>See: <a href="https://www.structuraltopicmodel.com/">Structural Topic
+Model</a> · <a href="https://CRAN.R-project.org/package=stm">stm on
+CRAN</a></p>
+</div>
+<div id="word-topic" class="section level2">
+<h2>Word-Topic</h2>
+<p><code>get_topic_terms()</code> returns the top terms per topic from
+the word-topic (beta) distribution.</p>
+<div class="sourceCode" id="cb7"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb7-1"><a href="#cb7-1" tabindex="-1"></a>terms <span class="ot">&lt;-</span> <span class="fu">get_topic_terms</span>(model, <span class="at">top_term_n =</span> <span class="dv">10</span>)</span>
+<span id="cb7-2"><a href="#cb7-2" tabindex="-1"></a><span class="fu">head</span>(terms, <span class="dv">15</span>)</span></code></pre></div>
+<pre><code>## # A tibble: 15 × 3
+##    topic term           beta
+##    &lt;int&gt; &lt;chr&gt;         &lt;dbl&gt;
+##  1     1 students     0.0497
+##  2     1 learning     0.0386
+##  3     1 instruction  0.0335
+##  4     1 disabilities 0.0272
+##  5     1 mathematics  0.0221
+##  6     1 computer     0.0180
+##  7     1 math         0.0165
+##  8     1 education    0.0151
+##  9     1 assisted     0.0146
+## 10     1 disabled     0.0114
+## 11     2 computer     0.0290
+## 12     2 learning     0.0248
+## 13     2 instruction  0.0244
+## 14     2 assisted     0.0239
+## 15     2 students     0.0204</code></pre>
+</div>
+<div id="content-generation" class="section level2">
+<h2>Content Generation</h2>
+<p><code>generate_topic_content()</code> drafts topic-grounded content
+(survey items, research questions, theme descriptions, policy
+recommendations, interview questions) from
+<code>get_topic_terms()</code> output. It calls an LLM, so it needs an
+OpenAI or Gemini API key.</p>
+<table>
+<thead>
+<tr class="header">
+<th>Content type</th>
+<th>Output</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><code>survey_item</code></td>
+<td>Likert-scale statement</td>
+</tr>
+<tr class="even">
+<td><code>research_question</code></td>
+<td>Research question</td>
+</tr>
+<tr class="odd">
+<td><code>theme_description</code></td>
+<td>Qualitative theme summary</td>
+</tr>
+<tr class="even">
+<td><code>policy_recommendation</code></td>
+<td>Action-oriented statement</td>
+</tr>
+<tr class="odd">
+<td><code>interview_question</code></td>
+<td>Open-ended question</td>
+</tr>
+</tbody>
+</table>
+<div class="sourceCode" id="cb9"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb9-1"><a href="#cb9-1" tabindex="-1"></a>labels <span class="ot">&lt;-</span> <span class="fu">generate_topic_labels</span>(terms, <span class="at">provider =</span> <span class="st">&quot;openai&quot;</span>)</span>
+<span id="cb9-2"><a href="#cb9-2" tabindex="-1"></a></span>
+<span id="cb9-3"><a href="#cb9-3" tabindex="-1"></a>content <span class="ot">&lt;-</span> <span class="fu">generate_topic_content</span>(terms, <span class="at">content_type =</span> <span class="st">&quot;research_question&quot;</span>, <span class="at">provider =</span> <span class="st">&quot;openai&quot;</span>)</span></code></pre></div>
+</div>
+<div id="document-topic" class="section level2">
+<h2>Document-Topic</h2>
+<p><code>calculate_topic_probability()</code> summarizes the
+corpus-level expected topic proportions (mean of the per-document theta
+matrix).</p>
+<div class="sourceCode" id="cb10"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb10-1"><a href="#cb10-1" tabindex="-1"></a>doc_topic <span class="ot">&lt;-</span> <span class="fu">calculate_topic_probability</span>(model, <span class="at">top_n =</span> <span class="dv">10</span>, <span class="at">verbose =</span> <span class="cn">FALSE</span>)</span>
+<span id="cb10-2"><a href="#cb10-2" tabindex="-1"></a>doc_topic</span></code></pre></div>
+<pre><code>## # A tibble: 5 × 2
+##   topic gamma
+##   &lt;int&gt; &lt;dbl&gt;
+## 1     1 0.265
+## 2     2 0.223
+## 3     3 0.215
+## 4     4 0.157
+## 5     5 0.141</code></pre>
+</div>
+<div id="quotes" class="section level2">
+<h2>Quotes</h2>
+<p><code>stm::findThoughts()</code> returns the documents most
+representative of a topic.</p>
+<div class="sourceCode" id="cb12"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb12-1"><a href="#cb12-1" tabindex="-1"></a>quotes <span class="ot">&lt;-</span> stm<span class="sc">::</span><span class="fu">findThoughts</span>(model, <span class="at">texts =</span> united_tbl<span class="sc">$</span>united_texts, <span class="at">topics =</span> <span class="dv">1</span>, <span class="at">n =</span> <span class="dv">3</span>)</span>
+<span id="cb12-2"><a href="#cb12-2" tabindex="-1"></a>quotes</span></code></pre></div>
+<pre><code>## 
+##  Topic 1: 
+##       A study to determine the effectiveness of computer-assisted instruction on the mathematics achievement levels of learning disabled elementary students computer-assisted instruction.//mathematics achievement.//learning disabled elementary students.//Computer Assisted Instruction.//Elementary School Students.//Learning Disabilities.//Special Education.//Mathematics.//Teaching Students experiencing difficulties in mathematics are present in most classrooms. There are in excess of 6 million students who receive special education services in the United States (U.S. Department of Education, 2001), and between 5% and 10% of school children experience some type of mathematical learning disability (Geary, 2004; Kroesbergen &amp; Luit, 2003). In addition to problems with conceptualization, speed of processing, and effective use of strategies, one of the deficiencies that can negatively affect the performance of these students is fact retrieval. Research indicates that the ability to succeed in higher level math skills is directly related to the student&#39;s ability to effectively use lower level mathematics skills such as basic facts (Hasselbring, 1987; Hasselbring, Lott, &amp; Zydney, 2006; Mattingly &amp; Bott, 1990). The purpose of this research was to study the effects of Computer-Assisted Instruction on Learning Disabled students&#39; performance in mathematics. Specifically, this study investigated whether using computer-assisted instruction could significantly affect the students&#39; achievement levels on the Measures of Academic Progress test. The population consisted of 190 students enrolled in an elementary school in the Low Country of South Carolina. The participants were divided into two groups: (1) 165 students in grades 3 through 5 regular classes who did not receive computer-assisted instruction and (2) 25 students in grades 3 through 5 placed in the Learning Disabilities Resource Program who did receive computer-assisted instruction. All students were pre-tested on the Measures of Academic Progress. The experimental group received instruction on the FACTMASTER® CD-ROM program. The Measure of Academic Progress test was utilized to measure pre-treatment and post-treatment achievement levels. The following research questions were addressed: (1) Do significant differences exist between the pre-test and post-test scores for those Learning Disabled students receiving computer-assisted instruction and those students in the regular education class who do not receive computer-assisted instruction at the third, fourth, and fifth grade level? (2) Do significant differences exist between the pre-test and post-test scores for those Learning Disabled students receiving computer-assisted instruction and those students in the regular education class who do not receive computer-assisted instruction at the third grade level? (3) Do significant differences exist between the pre-test and post-test scores for those Learning Disabled students receiving computer-assisted instruction and those students in the regular education class who do not receive computer-assisted instruction at the fourth grade level? (4) Do significant differences exist between the pre-test and post-test scores for those Learning Disabled students receiving computer-assisted instruction and those students in the regular education class who do not receive computer-assisted instruction at the fifth grade level? The primary instrument was the Measured Academic Performance Test. Independent samples t tests were conducted in order to compare the means of the pre-test to post-test gains of the groups involved.
+##      Blending Assessment with Instruction Program (BAIP): Impact of an online standards-based curriculum on 8th grade students&#39; math achievement Blending Assessment with Instruction Program.//online standards.//curriculum.//8th grade students&#39;.//math achievement.//Grade Level.//Internet.//Mathematics Achievement.//Programmed Instruction.//Mathematics Education.//Schools.//Students The primary purpose of this study was to pilot test the Blending Assessment with Instruction Program, a standards-based mathematics intervention in an inclusive setting, with eighth grade students. The Blending Assessment with Instruction Program intervention incorporated web-based lessons for teachers, online tutorials for students, and classroom management system into standards-based mathematics instruction. The focus was to determine the effectiveness of the design, content and usability as measured by teacher perceptions and outcome data of participating students. Student outcomes were measured by performance on pretests and posttests and statewide mathematics assessments. A secondary purpose was to evaluate the effectiveness of the intervention on (a) students with disabilities who receive their math instruction in the general education classroom and (b) students who qualify for free lunch. These two subgroups were identified to evaluate whether the intervention significantly impacted the population of students involved in the achievement gaps in math. The study was part of a more comprehensive pilot test of Blending Assessment with Instruction Program in grades 4, 5, 6, 7, and 8. A total of 222 eighth-grade students from the three schools in Kansas participated in the pilot test. The teachers included four general education and special education classroom teachers. The study utilized a quasi-experimental comparison-group design to measure the impact of Blending Assessment with Instruction Program on eighth-grade student math achievement. Data were collected to evaluate the effectiveness of Blending Assessment with Instruction Program relative to student performance on a pre/post test, 2006-2007 state assessment, and teacher perceptions and satisfaction of the intervention. The results of the pilot study did not show a statistically significant achievement difference on the overall state math assessment score or the select indicator score between students who received the Blending Assessment with Instruction Program intervention vs. the comparison group of students who did not. However, although significant differences were not found between the intervention and the comparison groups, significant differences did exist between the posttest scores of the subgroups of students who received the Blending Assessment with Instruction Program intervention. Additionally, the tutorial data suggested a strong correlation between the Blending Assessment with Instruction Program tutorials and select indicators.
+##      A comparison of two empirically validated approaches to teaching ratios and proportions to secondary remedial and learning disabled students videodisc program vs active teaching paradigm.//mathematics achievement.//remedial &amp; learning disabled high school students.//Learning Disabilities.//Mathematics Education.//Remedial Education.//Special Education.//Teaching Methods.//High School Students This study compared two curricula designed to teach ratio and proportion word problems. The experimental curriculum incorporated instructional design variables which have been shown to be most effective in teaching students; e.g., teaching discreet strategies in small steps. This curriculum was presented via an interactive videodisc program. The comparison curriculum was derived from four math basals and was taught following an active teaching paradigm. The curricula were matched for content and length. The subjects included 29 secondary students who qualified for remedial or special education services in math. The subjects were matched based on scores from a preskills test and the math portion of the Metropolitan Achievement Test and then randomly assigned to one of the two treatments. There were 16 students in the basal group and 13 students in the videodisc group. During the intervention data was collected on the groups&#39; on-task behavior, levels of appropriate teacher implementation, and written work. At the end of the six-week intervention students were administered a 21-item posttest. Teachers and students completed questionnaires regarding their perceptions of the two curricula. A parallel form of the posttest was administered as a maintenance test ten school days after the completion of the study. The students in the videodisc group performed significantly higher on the posttest and insignificantly higher on the maintenance test than students in the basal group. Means for the videodisc group on work samples were consistently above 80%, while means for the basal group showed a downward trend with means falling from 90% to 72%. Descriptive measures showed the percentage of on-task behavior for the videodisc and basal groups to be 76% and 68% respectively, with percentages of off-task behavior 10% and 20% respectively. Appropriate levels of teacher implementation were found for both groups. While the teachers felt strongly that the videodisc program was instructionally superior, they missed the greater interactions with students the basal curriculum afforded them. On the student questionnaire, a greater percentage of students in the videodisc group than in the basal group indicated they now felt able to successfully work proportion word problems.</code></pre>
+</div>
+<div id="estimated-effects" class="section level2">
+<h2>Estimated Effects</h2>
+<p><code>stm::estimateEffect()</code> regresses topic proportions on
+document covariates; <code>tidytext::tidy()</code> returns the per-topic
+coefficient table shown in the app’s Estimated Effects tab.</p>
+<div class="sourceCode" id="cb14"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb14-1"><a href="#cb14-1" tabindex="-1"></a>prep <span class="ot">&lt;-</span> stm<span class="sc">::</span><span class="fu">estimateEffect</span>(<span class="dv">1</span><span class="sc">:</span><span class="dv">5</span> <span class="sc">~</span> reference_type <span class="sc">+</span> year, model, <span class="at">metadata =</span> out<span class="sc">$</span>meta, <span class="at">uncertainty =</span> <span class="st">&quot;Global&quot;</span>)</span>
+<span id="cb14-2"><a href="#cb14-2" tabindex="-1"></a><span class="fu">head</span>(tidytext<span class="sc">::</span><span class="fu">tidy</span>(prep), <span class="dv">10</span>)</span></code></pre></div>
+<pre><code>## # A tibble: 10 × 6
+##    topic term                   estimate std.error statistic p.value
+##    &lt;int&gt; &lt;chr&gt;                     &lt;dbl&gt;     &lt;dbl&gt;     &lt;dbl&gt;   &lt;dbl&gt;
+##  1     1 (Intercept)            1.13       8.24        0.137 0.891  
+##  2     1 reference_typethesis   0.135      0.0921      1.47  0.145  
+##  3     1 year                  -0.000451   0.00412    -0.109 0.913  
+##  4     2 (Intercept)           21.9        7.58        2.89  0.00450
+##  5     2 reference_typethesis   0.276      0.0898      3.07  0.00253
+##  6     2 year                  -0.0109     0.00379    -2.86  0.00481
+##  7     3 (Intercept)          -20.3        7.66       -2.65  0.00903
+##  8     3 reference_typethesis  -0.172      0.0877     -1.96  0.0519 
+##  9     3 year                   0.0103     0.00383     2.68  0.00825
+## 10     4 (Intercept)          -12.1        6.91       -1.76  0.0812</code></pre>
+</div>
+<div id="categorical-covariates" class="section level2">
+<h2>Categorical Covariates</h2>
+<p><code>plot_topic_effects_categorical()</code> plots topic proportions
+across the levels of a categorical covariate.
+<code>stm::plot.estimateEffect(..., method = &quot;pointestimate&quot;, omit.plot = TRUE)</code>
+returns the model-based estimate and 95% CI per topic and level,
+reshaped here into the columns the plot expects.</p>
+<div class="sourceCode" id="cb16"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb16-1"><a href="#cb16-1" tabindex="-1"></a>ec <span class="ot">&lt;-</span> stm<span class="sc">::</span><span class="fu">plot.estimateEffect</span>(prep, <span class="st">&quot;reference_type&quot;</span>, <span class="at">method =</span> <span class="st">&quot;pointestimate&quot;</span>,</span>
+<span id="cb16-2"><a href="#cb16-2" tabindex="-1"></a>                               <span class="at">model =</span> model, <span class="at">omit.plot =</span> <span class="cn">TRUE</span>)</span>
+<span id="cb16-3"><a href="#cb16-3" tabindex="-1"></a>effects_cat <span class="ot">&lt;-</span> <span class="fu">do.call</span>(rbind, <span class="fu">lapply</span>(<span class="fu">seq_along</span>(ec<span class="sc">$</span>topics), <span class="cf">function</span>(i) {</span>
+<span id="cb16-4"><a href="#cb16-4" tabindex="-1"></a>  <span class="fu">data.frame</span>(<span class="at">topic =</span> ec<span class="sc">$</span>topics[i], <span class="at">value =</span> <span class="fu">as.character</span>(ec<span class="sc">$</span>uvals),</span>
+<span id="cb16-5"><a href="#cb16-5" tabindex="-1"></a>             <span class="at">proportion =</span> <span class="fu">as.numeric</span>(ec<span class="sc">$</span>means[[i]]),</span>
+<span id="cb16-6"><a href="#cb16-6" tabindex="-1"></a>             <span class="at">lower =</span> <span class="fu">as.numeric</span>(ec<span class="sc">$</span>cis[[i]][<span class="dv">1</span>, ]), <span class="at">upper =</span> <span class="fu">as.numeric</span>(ec<span class="sc">$</span>cis[[i]][<span class="dv">2</span>, ]))</span>
+<span id="cb16-7"><a href="#cb16-7" tabindex="-1"></a>}))</span>
+<span id="cb16-8"><a href="#cb16-8" tabindex="-1"></a><span class="fu">plot_topic_effects_categorical</span>(effects_cat)</span></code></pre></div>
+<p><img role="img" src="data:image/png;base64,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" /><!-- --></p>
+</div>
+<div id="continuous-covariates" class="section level2">
+<h2>Continuous Covariates</h2>
+<p><code>plot_topic_effects_continuous()</code> plots topic proportions
+across a continuous covariate. The same
+<code>plot.estimateEffect()</code> call with
+<code>method = &quot;continuous&quot;</code> returns the estimate and CI over a
+grid of the covariate.</p>
+<div class="sourceCode" id="cb17"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb17-1"><a href="#cb17-1" tabindex="-1"></a>en <span class="ot">&lt;-</span> stm<span class="sc">::</span><span class="fu">plot.estimateEffect</span>(prep, <span class="st">&quot;year&quot;</span>, <span class="at">method =</span> <span class="st">&quot;continuous&quot;</span>,</span>
+<span id="cb17-2"><a href="#cb17-2" tabindex="-1"></a>                               <span class="at">model =</span> model, <span class="at">omit.plot =</span> <span class="cn">TRUE</span>)</span>
+<span id="cb17-3"><a href="#cb17-3" tabindex="-1"></a>effects_cont <span class="ot">&lt;-</span> <span class="fu">do.call</span>(rbind, <span class="fu">lapply</span>(<span class="fu">seq_along</span>(en<span class="sc">$</span>topics), <span class="cf">function</span>(i) {</span>
+<span id="cb17-4"><a href="#cb17-4" tabindex="-1"></a>  <span class="fu">data.frame</span>(<span class="at">topic =</span> en<span class="sc">$</span>topics[i], <span class="at">value =</span> en<span class="sc">$</span>x,</span>
+<span id="cb17-5"><a href="#cb17-5" tabindex="-1"></a>             <span class="at">proportion =</span> <span class="fu">as.numeric</span>(en<span class="sc">$</span>means[[i]]),</span>
+<span id="cb17-6"><a href="#cb17-6" tabindex="-1"></a>             <span class="at">lower =</span> <span class="fu">as.numeric</span>(en<span class="sc">$</span>ci[[i]][<span class="dv">1</span>, ]), <span class="at">upper =</span> <span class="fu">as.numeric</span>(en<span class="sc">$</span>ci[[i]][<span class="dv">2</span>, ]))</span>
+<span id="cb17-7"><a href="#cb17-7" tabindex="-1"></a>}))</span>
+<span id="cb17-8"><a href="#cb17-8" tabindex="-1"></a><span class="fu">plot_topic_effects_continuous</span>(effects_cont)</span></code></pre></div>
+<p><img role="img" src="data:image/png;base64,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" /><!-- --></p>
+</div>
+<div id="embedding-based-topics" class="section level2">
+<h2>Embedding-based Topics</h2>
+<p>The second type embeds documents with a transformer, reduces
+dimensionality, and clusters the embeddings into topics.
+<code>get_best_embeddings()</code> produces the embeddings and
+<code>fit_embedding_model()</code> clusters them;
+<code>generate_topic_labels()</code> drafts labels. These need Python
+(BERTopic) or an embedding API key, so they are shown without
+running.</p>
+<div class="sourceCode" id="cb18"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb18-1"><a href="#cb18-1" tabindex="-1"></a>embeddings <span class="ot">&lt;-</span> <span class="fu">get_best_embeddings</span>(united_tbl<span class="sc">$</span>united_texts, <span class="at">provider =</span> <span class="st">&quot;openai&quot;</span>)</span>
+<span id="cb18-2"><a href="#cb18-2" tabindex="-1"></a></span>
+<span id="cb18-3"><a href="#cb18-3" tabindex="-1"></a>topics <span class="ot">&lt;-</span> <span class="fu">fit_embedding_model</span>(</span>
+<span id="cb18-4"><a href="#cb18-4" tabindex="-1"></a>  united_tbl<span class="sc">$</span>united_texts,</span>
+<span id="cb18-5"><a href="#cb18-5" tabindex="-1"></a>  <span class="at">method =</span> <span class="st">&quot;umap_hdbscan&quot;</span>,</span>
+<span id="cb18-6"><a href="#cb18-6" tabindex="-1"></a>  <span class="at">n_topics =</span> <span class="dv">10</span>,</span>
+<span id="cb18-7"><a href="#cb18-7" tabindex="-1"></a>  <span class="at">precomputed_embeddings =</span> embeddings</span>
+<span id="cb18-8"><a href="#cb18-8" tabindex="-1"></a>)</span>
+<span id="cb18-9"><a href="#cb18-9" tabindex="-1"></a></span>
+<span id="cb18-10"><a href="#cb18-10" tabindex="-1"></a>embedding_labels <span class="ot">&lt;-</span> <span class="fu">generate_topic_labels</span>(topics<span class="sc">$</span>topic_terms, <span class="at">provider =</span> <span class="st">&quot;openai&quot;</span>)</span></code></pre></div>
+<table>
+<colgroup>
+<col width="41%" />
+<col width="29%" />
+<col width="29%" />
+</colgroup>
+<thead>
+<tr class="header">
+<th>Provider</th>
+<th>Model</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>Sentence Transformers (default)</td>
+<td>all-MiniLM-L6-v2, all-mpnet-base-v2</td>
+<td>Requires Python</td>
+</tr>
+<tr class="even">
+<td>OpenAI</td>
+<td>text-embedding-3-small, text-embedding-3-large</td>
+<td>API key</td>
+</tr>
+<tr class="odd">
+<td>Gemini</td>
+<td>gemini-embedding-001</td>
+<td>API key</td>
+</tr>
+</tbody>
+</table>
+<p>R backend methods follow <code>{dimred}_{clustering}</code> (e.g.,
+<code>&quot;umap_dbscan&quot;</code>, <code>&quot;tsne_kmeans&quot;</code>,
+<code>&quot;pca_hierarchical&quot;</code>). See: <a href="https://maartengr.github.io/BERTopic/">BERTopic</a> · <a href="https://www.sbert.net/">Sentence-BERT</a></p>
+</div>
+<div id="stm-vs-embedding" class="section level2">
+<h2>STM vs Embedding</h2>
+<table>
+<thead>
+<tr class="header">
+<th>Feature</th>
+<th>STM</th>
+<th>Embedding</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>Speed</td>
+<td>Fast</td>
+<td>Medium</td>
+</tr>
+<tr class="even">
+<td>Metadata covariates</td>
+<td>Yes</td>
+<td>No</td>
+</tr>
+<tr class="odd">
+<td>Short texts</td>
+<td>Weaker</td>
+<td>Strong</td>
+</tr>
+<tr class="even">
+<td>Multilingual</td>
+<td>No</td>
+<td>Yes</td>
+</tr>
+<tr class="odd">
+<td>Dependencies</td>
+<td>R only</td>
+<td>Python or API</td>
+</tr>
+</tbody>
+</table>
+</div>
+
+
+
+<!-- code folding -->
+
+
+<!-- dynamically load mathjax for compatibility with self-contained -->
+<script>
+  (function () {
+    var script = document.createElement("script");
+    script.type = "text/javascript";
+    script.src  = "https://mathjax.rstudio.com/latest/MathJax.js?config=TeX-AMS-MML_HTMLorMML";
+    document.getElementsByTagName("head")[0].appendChild(script);
+  })();
+</script>
+
+</body>
+</html>

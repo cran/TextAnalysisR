@@ -1,0 +1,3382 @@
+#' @title Lexical Analysis Functions
+#'
+#' @description
+#' Functions for lexical analysis including:
+#' - Linguistic Annotation (POS tagging, NER)
+#' - Frequency Analysis (word frequency, n-grams, MWEs)
+#' - Keywords (TF-IDF, keyness)
+#' - Lexical Diversity (TTR, MTLD, MATTR)
+#' - Readability (Flesch, Gunning Fog, etc.)
+#'
+#' @name lexical_analysis
+#' @concept lexical
+NULL
+
+
+.lexdiv_cache <- new.env(hash = TRUE, parent = emptyenv())
+
+.mtld_one_direction <- function(toks, factor_size = 0.72) {
+  n_toks <- length(toks)
+  seen <- new.env(hash = TRUE, size = n_toks)
+  unique_count <- 0
+  factors <- 0
+  start_idx <- 1
+
+  for (i in seq_len(n_toks)) {
+    token <- toks[i]
+    if (!exists(token, envir = seen, inherits = FALSE)) {
+      assign(token, TRUE, envir = seen)
+      unique_count <- unique_count + 1
+    }
+    current_length <- i - start_idx + 1
+    current_ttr <- unique_count / current_length
+
+    # factors under 10 tokens are textual blips, not counted
+    if (current_ttr <= factor_size && current_length >= 10) {
+      factors <- factors + 1
+      rm(list = ls(seen), envir = seen)
+      unique_count <- 0
+      start_idx <- i + 1
+    }
+  }
+
+  if (start_idx <= n_toks) {
+    remaining_length <- n_toks - start_idx + 1
+    if (remaining_length > 0 && unique_count > 0) {
+      final_ttr <- unique_count / remaining_length
+      factors <- factors + (1 - final_ttr) / (1 - factor_size)
+    }
+  }
+
+  if (factors > 0) n_toks / factors else NA_real_
+}
+
+.calc_mtld <- function(tokens, factor_size = 0.72) {
+  if (length(tokens) < 10) return(NA_real_)
+  mean(c(
+    .mtld_one_direction(tokens, factor_size),
+    .mtld_one_direction(rev(tokens), factor_size)
+  ), na.rm = TRUE)
+}
+
+.calc_hdd <- function(tokens, sample_size = 42) {
+  n_toks <- length(tokens)
+  if (n_toks < sample_size) return(NA_real_)
+  type_counts <- as.integer(table(tokens))
+  # probability each type appears in a random 42-token draw
+  sum((1 - stats::dhyper(0, type_counts, n_toks - type_counts, sample_size)) / sample_size)
+}
+
+#' Clear Lexical Diversity Cache
+#'
+#' @description
+#' Clears the internal cache used for lexical diversity calculations.
+#' Call this function to free memory or force fresh calculations.
+#'
+#' @return Invisible NULL
+#' @concept lexical
+#' @importFrom Matrix colSums
+#' @export
+clear_lexdiv_cache <- function() {
+  rm(list = ls(.lexdiv_cache), envir = .lexdiv_cache)
+  invisible(NULL)
+}
+
+
+#' @title Detect Multi-Word Expressions
+#'
+#' @description
+#' This function detects multi-word expressions (collocations) of specified
+#' sizes that appear at least a specified number of times in the provided tokens.
+#'
+#' @param tokens A \code{tokens} object from the \code{quanteda} package.
+#' @param size A numeric vector specifying the sizes of the collocations to detect (default: 2:5).
+#' @param min_count The minimum number of occurrences for a collocation to be
+#'   considered (default: 2).
+#'
+#' @return A character vector of detected collocations.
+#'
+#' @concept lexical
+#' @export
+#'
+#' @examples
+#' \donttest{
+#'   mydata <- TextAnalysisR::SpecialEduTech[seq_len(50), ]
+#'
+#'   united_tbl <- TextAnalysisR::unite_cols(
+#'     mydata,
+#'     listed_vars = c("title", "keyword", "abstract")
+#'   )
+#'
+#'   tokens <- TextAnalysisR::prep_texts(united_tbl, text_field = "united_texts")
+#'
+#'   collocations <- TextAnalysisR::detect_multi_words(tokens, size = 2:3, min_count = 2)
+#'   print(collocations)
+#' }
+detect_multi_words <- function(tokens, size = 2:5, min_count = 2) {
+  tstat <- quanteda.textstats::textstat_collocations(tokens, size = size, min_count = min_count)
+  tstat_collocation <- tstat$collocation
+  return(tstat_collocation)
+}
+
+
+#' Extract Part-of-Speech Tags from Tokens
+#'
+#' @description
+#' Uses spaCy to extract part-of-speech (POS) tags from tokenized text.
+#' Returns a data frame with token-level POS annotations.
+#'
+#' @param tokens A quanteda tokens object or character vector of texts.
+#' @param include_lemma Logical; include lemmatized forms (default: TRUE).
+#' @param include_entity Logical; include named entity recognition (default: FALSE).
+#' @param include_dependency Logical; include dependency parsing (default: FALSE).
+#' @param model Character; spaCy model to use (default: "en_core_web_sm").
+#'
+#' @return A data frame with columns:
+#' \itemize{
+#'   \item \code{doc_id}: Document identifier
+#'   \item \code{sentence_id}: Sentence number within document
+#'   \item \code{token_id}: Token position within sentence
+#'   \item \code{token}: Original token
+#'   \item \code{pos}: Universal POS tag (e.g., NOUN, VERB, ADJ)
+#'   \item \code{tag}: Detailed POS tag (e.g., NN, VBD, JJ)
+#'   \item \code{lemma}: Lemmatized form (if include_lemma = TRUE)
+#'   \item \code{entity}: Named entity type (if include_entity = TRUE)
+#'   \item \code{head_token_id}: Head token in dependency tree (if include_dependency = TRUE)
+#'   \item \code{dep_rel}: Dependency relation type, e.g., nsubj, dobj (if include_dependency = TRUE)
+#' }
+#'
+#' @details
+#' This function requires the Python
+#' with spaCy installed. If spaCy is not initialized, this function will
+#' attempt to initialize it with the specified model.
+#'
+#' @concept lexical
+#' @export
+#'
+#' @examples
+#' if (interactive()) {
+#'   tokens <- quanteda::tokens(TextAnalysisR::SpecialEduTech$abstract[1])
+#'   pos_data <- extract_pos_tags(tokens)
+#'   print(pos_data)
+#' }
+extract_pos_tags <- function(tokens,
+                             include_lemma = TRUE,
+                             include_entity = FALSE,
+                             include_dependency = FALSE,
+                             model = "en_core_web_sm") {
+
+  if (!requireNamespace("reticulate", quietly = TRUE)) {
+    return(.notify_missing_python("POS tagging via spaCy"))
+  }
+
+  parsed <- spacy_parse_full(
+    tokens,
+    pos = TRUE,
+    tag = TRUE,
+    lemma = include_lemma,
+    entity = include_entity,
+    dependency = include_dependency,
+    model = model
+  )
+
+  return(parsed)
+}
+
+
+#' Extract Morphological Features
+#'
+#' @description
+#' Uses spaCy to extract morphological features from text.
+#' Returns data with Number, Tense, VerbForm, Person, Case, Mood, Aspect, etc.
+#'
+#' @param tokens A quanteda tokens object or character vector of texts.
+#' @param features Character vector of morphological features to extract.
+#'   Default includes common Universal Dependencies features.
+#' @param include_pos Logical; include POS tags (default: TRUE).
+#' @param include_lemma Logical; include lemmatized forms (default: TRUE).
+#' @param model Character; spaCy model to use (default: "en_core_web_sm").
+#'
+#' @return A data frame with token-level morphological annotations including
+#'   morph_* columns for each requested feature.
+#'
+#' @details
+#' Morphological features follow Universal Dependencies annotation.
+#' Common features include:
+#' \itemize{
+#'   \item \code{Number}: Sing (singular), Plur (plural)
+#'   \item \code{Tense}: Past, Pres (present), Fut (future)
+#'   \item \code{VerbForm}: Fin (finite), Inf (infinitive), Part (participle), Ger (gerund)
+#'   \item \code{Person}: 1, 2, 3 (first, second, third person)
+#'   \item \code{Case}: Nom (nominative), Acc (accusative), Gen (genitive), Dat (dative)
+#'   \item \code{Mood}: Ind (indicative), Imp (imperative), Sub (subjunctive)
+#'   \item \code{Aspect}: Perf (perfective), Imp (imperfective), Prog (progressive)
+#' }
+#'
+#' @concept lexical
+#' @export
+#'
+#' @examples
+#' if (interactive()) {
+#'   tokens <- quanteda::tokens(TextAnalysisR::SpecialEduTech$abstract[1])
+#'   morphology_data <- extract_morphology(tokens)
+#'   print(morphology_data)
+#' }
+extract_morphology <- function(tokens,
+                               features = c("Number", "Tense", "VerbForm",
+                                            "Person", "Case", "Mood", "Aspect"),
+                               include_pos = TRUE,
+                               include_lemma = TRUE,
+                               model = "en_core_web_sm") {
+
+  # Use spacy_parse_full with morphology enabled
+  parsed <- spacy_parse_full(
+    tokens,
+    pos = include_pos,
+    tag = include_pos,
+    lemma = include_lemma,
+    entity = FALSE,
+    dependency = FALSE,
+    morph = TRUE,
+    model = model
+  )
+
+  # Parse the morph string into individual feature columns
+  if ("morph" %in% names(parsed) && nrow(parsed) > 0) {
+    parsed <- parse_morphology_string(parsed, features)
+  }
+
+  return(parsed)
+}
+
+
+#' Plot Morphology Feature Distribution
+#'
+#' @description
+#' Creates a bar chart showing the distribution of a morphological feature
+#' using consistent package styling.
+#'
+#' @param data Data frame with morph_* columns from extract_morphology().
+#' @param feature Character; feature name (e.g., "Number", "Tense").
+#' @param title Character; plot title (auto-generated if NULL).
+#' @param colors Named character vector of custom colors for feature values.
+#'
+#' @return A plotly object.
+#'
+#' @concept lexical
+#' @export
+#'
+#' @examples
+#' if (interactive()) {
+#'   tokens <- quanteda::tokens(TextAnalysisR::SpecialEduTech$abstract[1])
+#'   morphology_data <- extract_morphology(tokens)
+#'   plot_morphology_feature(morphology_data, "Tense")
+#' }
+plot_morphology_feature <- function(data,
+                                    feature,
+                                    title = NULL,
+                                    colors = NULL) {
+
+  col_name <- paste0("morph_", feature)
+
+  if (!col_name %in% names(data)) {
+    return(
+      ggplot2::ggplot() +
+        ggplot2::annotate("text", x = 0.5, y = 0.5,
+                          label = paste("Feature", feature, "not available"),
+                          size = 5, color = "#ef4444") +
+        ggplot2::theme_void()
+    )
+  }
+
+  values <- data[[col_name]]
+  values <- values[!is.na(values) & values != ""]
+
+  if (length(values) == 0) {
+    return(
+      ggplot2::ggplot() +
+        ggplot2::annotate("text", x = 0.5, y = 0.5,
+                          label = paste("No", feature, "data found"),
+                          size = 5, color = "#ef4444") +
+        ggplot2::theme_void()
+    )
+  }
+
+  freq_df <- as.data.frame(table(values), stringsAsFactors = FALSE)
+  names(freq_df) <- c("Value", "Count")
+  freq_df <- freq_df[order(-freq_df$Count), ]
+  freq_df$Percentage <- round(freq_df$Count / sum(freq_df$Count) * 100, 1)
+
+  if (is.null(title)) {
+    title <- paste(feature, "Distribution")
+  }
+
+  if (is.null(colors)) {
+    colors <- switch(feature,
+      "Number" = c("Sing" = "#3B82F6", "Plur" = "#10B981"),
+      "Tense" = c("Past" = "#EF4444", "Pres" = "#3B82F6", "Fut" = "#10B981"),
+      "VerbForm" = c("Fin" = "#3B82F6", "Inf" = "#8B5CF6",
+                     "Part" = "#F59E0B", "Ger" = "#10B981"),
+      "Person" = c("1" = "#3B82F6", "2" = "#10B981", "3" = "#F59E0B"),
+      "Case" = c("Nom" = "#3B82F6", "Acc" = "#10B981",
+                 "Gen" = "#F59E0B", "Dat" = "#8B5CF6"),
+      "Mood" = c("Ind" = "#3B82F6", "Imp" = "#EF4444", "Sub" = "#8B5CF6"),
+      "Aspect" = c("Perf" = "#3B82F6", "Imp" = "#10B981", "Prog" = "#F59E0B"),
+      NULL
+    )
+  }
+
+  bar_colors <- if (!is.null(colors) && length(colors) > 0) {
+    vapply(freq_df$Value, function(v) {
+      if (v %in% names(colors)) colors[[v]] else "#6B7280"
+    }, character(1))
+  } else {
+    rep("#337ab7", nrow(freq_df))
+  }
+
+  freq_df$fill_color <- bar_colors
+
+  ggplot2::ggplot(freq_df, ggplot2::aes(x = Value, y = Count,
+                                         text = paste0(Value, "\nCount: ", Count, "\n", Percentage, "%"))) +
+    ggplot2::geom_col(fill = freq_df$fill_color) +
+    ggplot2::labs(x = "", y = "Frequency", title = title) +
+    ggplot2::theme_minimal(base_size = 11) +
+    ggplot2::theme(
+      plot.title = ggplot2::element_text(size = 13, color = "#0c1f4a"),
+      axis.text = ggplot2::element_text(size = 11, color = "#3B3B3B"),
+      axis.title = ggplot2::element_text(size = 12, color = "#0c1f4a")
+    )
+}
+
+
+#' Summarize Morphology Features
+#'
+#' @description
+#' Creates a summary table of morphological feature distributions
+#' with counts and percentages for each feature value.
+#'
+#' @param data Data frame with morph_* columns from extract_morphology().
+#' @param features Character vector of features to summarize.
+#'   If NULL, all available morph_* columns are used.
+#'
+#' @return A data frame with Feature, Value, Count, and Percentage columns.
+#'
+#' @concept lexical
+#' @export
+#'
+#' @examples
+#' if (interactive()) {
+#'   tokens <- quanteda::tokens(TextAnalysisR::SpecialEduTech$abstract[1])
+#'   morphology_data <- extract_morphology(tokens)
+#'   summary_table <- summarize_morphology(morphology_data)
+#'   print(summary_table)
+#' }
+summarize_morphology <- function(data, features = NULL) {
+  morph_cols <- grep("^morph_", names(data), value = TRUE)
+
+  if (length(morph_cols) == 0) {
+    return(data.frame(
+      Feature = character(0),
+      Value = character(0),
+      Count = integer(0),
+      Percentage = numeric(0),
+      stringsAsFactors = FALSE
+    ))
+  }
+
+  if (!is.null(features)) {
+    target_cols <- paste0("morph_", features)
+    morph_cols <- intersect(morph_cols, target_cols)
+  }
+
+  summary_list <- lapply(morph_cols, function(col) {
+    feat_name <- gsub("morph_", "", col)
+    values <- data[[col]]
+    values <- values[!is.na(values) & values != ""]
+
+    if (length(values) == 0) return(NULL)
+
+    counts <- as.data.frame(table(values), stringsAsFactors = FALSE)
+    names(counts) <- c("Value", "Count")
+    counts$Feature <- feat_name
+    counts$Percentage <- round(counts$Count / sum(counts$Count) * 100, 1)
+    counts[, c("Feature", "Value", "Count", "Percentage")]
+  })
+
+  result <- do.call(rbind, summary_list)
+  if (is.null(result)) {
+    return(data.frame(
+      Feature = character(0),
+      Value = character(0),
+      Count = integer(0),
+      Percentage = numeric(0),
+      stringsAsFactors = FALSE
+    ))
+  }
+
+  return(result)
+}
+
+
+#' Extract Named Entities from Tokens
+#'
+#' @description
+#' Uses spaCy to extract named entities (NER) from tokenized text.
+#' Returns a data frame with token-level entity annotations.
+#'
+#' @param tokens A quanteda tokens object or character vector of texts.
+#' @param include_pos Logical; include POS tags (default: TRUE).
+#' @param include_lemma Logical; include lemmatized forms (default: TRUE).
+#' @param model Character; spaCy model to use (default: "en_core_web_sm").
+#'
+#' @return A data frame with columns:
+#' \itemize{
+#'   \item \code{doc_id}: Document identifier
+#'   \item \code{token}: Original token
+#'   \item \code{entity}: Named entity type (e.g., PERSON, ORG, GPE)
+#'   \item \code{pos}: Universal POS tag (if include_pos = TRUE)
+#'   \item \code{lemma}: Lemmatized form (if include_lemma = TRUE)
+#' }
+#'
+#' @details
+#' This function requires the Python
+#' with spaCy installed. If spaCy is not initialized, this function will
+#' attempt to initialize it with the specified model.
+#'
+#' @concept lexical
+#' @export
+#'
+#' @examples
+#' if (interactive()) {
+#'   tokens <- quanteda::tokens(TextAnalysisR::SpecialEduTech$abstract[1])
+#'   entity_data <- extract_named_entities(tokens)
+#'   print(entity_data)
+#' }
+extract_named_entities <- function(tokens,
+                                   include_pos = TRUE,
+                                   include_lemma = TRUE,
+                                   model = "en_core_web_sm") {
+
+  # Use spacy_parse_full with entity enabled
+  parsed <- spacy_parse_full(
+    tokens,
+    pos = include_pos,
+    tag = include_pos,
+    lemma = include_lemma,
+    entity = TRUE,
+    dependency = FALSE,
+    model = model
+  )
+
+  return(parsed)
+}
+
+
+#' Lexical Diversity Analysis
+#'
+#' @description
+#' Calculates multiple lexical diversity metrics for a document-feature matrix (DFM)
+#' or tokens object. Supports all quanteda.textstats measures plus MTLD
+#' (Measure of Textual Lexical Diversity), which is the most recommended measure
+#' according to McCarthy & Jarvis (2010) for being independent of text length.
+#'
+#' @param x A quanteda DFM or tokens object. Tokens object is preferred for
+#'   accurate MTLD calculation since it preserves token order.
+#' @param measures Character vector of measures to calculate.
+#'   Default is "all" which includes: TTR, C, R, CTTR, U, S, K, I, D, Vm, Maas, MATTR, MSTTR, MTLD, and HDD.
+#'   Most recommended: "MTLD", "MATTR", or "HDD" for length-independent measures.
+#' @param texts Optional character vector of original texts. Required for MTLD
+#'   calculation when using DFM input (since DFM loses token order).
+#' @param cache_key Optional cache key (e.g., from digest::digest) for caching
+#'   expensive calculations. Use the same cache_key to retrieve cached results.
+#'
+#' @return A list containing:
+#' \itemize{
+#'   \item \code{lexical_diversity}: Data frame with per-document lexical diversity scores
+#'   \item \code{summary_stats}: List of summary statistics (mean, median, sd) for each measure
+#' }
+#'
+#' @details
+#' MTLD (Measure of Textual Lexical Diversity) is calculated using the algorithm
+
+#' from McCarthy & Jarvis (2010). It counts the number of "factors" needed to
+#' reduce TTR below 0.72, then divides the number of tokens by the number of factors.
+#' This provides a length-independent measure of lexical diversity.
+#'
+#' Important notes:
+#' \itemize{
+#'   \item For MTLD accuracy, pass a tokens object (not DFM) as input
+#'   \item If using DFM, provide the 'texts' parameter for MTLD calculation
+#'   \item MATTR and MSTTR window sizes are automatically adjusted for short documents
+#'   \item Raw TTR falls mechanically as documents lengthen; compare TTR only
+#'     across documents of similar length
+#'   \item MTLD and MATTR are most reliable at 100+ tokens per document
+#'   \item Results are cached when cache_key is provided for repeated analysis
+#' }
+#'
+#' @references
+#' McCarthy, P. M., & Jarvis, S. (2010). MTLD, vocd-D, and HD-D: A validation study
+#' of sophisticated approaches to lexical diversity assessment.
+#' Behavior Research Methods, 42(2), 381-392.
+#'
+#' @concept lexical
+#' @seealso [calculate_text_readability()] for grade-level / Flesch metrics on the same input; [calculate_lexical_dispersion()] for term spread across documents; [plot_lexical_diversity_distribution()] to visualize
+#' @export
+#'
+#' @examples
+#' \donttest{
+#' data(SpecialEduTech)
+#' texts <- SpecialEduTech$abstract[1:10]
+#' corp <- quanteda::corpus(texts)
+#' toks <- quanteda::tokens(corp)
+#' # Preferred: pass tokens object for accurate MTLD
+#' lex_div <- lexical_diversity_analysis(toks, texts = texts)
+#' # With caching for repeated analysis
+#' cache_key <- digest::digest(texts)
+#' lex_div <- lexical_diversity_analysis(toks, texts = texts, cache_key = cache_key)
+#' # Alternative: pass DFM with texts for MTLD accuracy
+#' dfm_obj <- quanteda::dfm(toks)
+#' lex_div <- lexical_diversity_analysis(dfm_obj, texts = texts)
+#' print(lex_div)
+#' }
+#'
+#' @importFrom quanteda.textstats textstat_lexdiv
+#' @importFrom quanteda docnames
+lexical_diversity_analysis <- function(x,
+                                      measures = "all",
+                                      texts = NULL,
+                                      cache_key = NULL) {
+
+  # Check cache first if cache_key is provided
+
+  if (!is.null(cache_key) && nzchar(cache_key)) {
+    cache_id <- paste0("lexdiv_", cache_key)
+    if (exists(cache_id, envir = .lexdiv_cache, inherits = FALSE)) {
+      return(get(cache_id, envir = .lexdiv_cache, inherits = FALSE))
+    }
+  }
+
+  if (!requireNamespace("quanteda.textstats", quietly = TRUE)) {
+    stop("Package 'quanteda.textstats' is required. Please install it.")
+  }
+
+  quanteda_measures <- c("TTR", "C", "R", "CTTR", "U", "S", "K", "I", "D", "Vm", "Maas")
+  mtld_requested <- FALSE
+  mattr_requested <- FALSE
+  msttr_requested <- FALSE
+  hdd_requested <- FALSE
+
+  if ("all" %in% measures) {
+    measures_to_use <- quanteda_measures
+    mtld_requested <- TRUE
+    mattr_requested <- TRUE
+    msttr_requested <- TRUE
+    hdd_requested <- TRUE
+  } else {
+    if ("MTLD" %in% measures) {
+      mtld_requested <- TRUE
+      measures <- setdiff(measures, "MTLD")
+    }
+    if ("MATTR" %in% measures) {
+      mattr_requested <- TRUE
+      measures <- setdiff(measures, "MATTR")
+    }
+    if ("MSTTR" %in% measures) {
+      msttr_requested <- TRUE
+      measures <- setdiff(measures, "MSTTR")
+    }
+    if ("HDD" %in% measures) {
+      hdd_requested <- TRUE
+      measures <- setdiff(measures, "HDD")
+    }
+    measures_to_use <- intersect(measures, quanteda_measures)
+  }
+
+  is_tokens_input <- inherits(x, "tokens")
+  seq_tokens <- NULL
+  if ((mtld_requested || mattr_requested || msttr_requested || hdd_requested) && !is_tokens_input) {
+    if (!is.null(texts) && length(texts) == quanteda::ndoc(x)) {
+      seq_tokens <- quanteda::tokens(texts, remove_punct = TRUE)
+    } else {
+      message("MTLD/MATTR/MSTTR/HDD require sequential token order. DFM input loses token order. ",
+              "Pass a tokens object or provide the 'texts' parameter. Skipping.")
+      mtld_requested <- FALSE
+      mattr_requested <- FALSE
+      msttr_requested <- FALSE
+      hdd_requested <- FALSE
+    }
+  }
+
+  tryCatch({
+    if (is_tokens_input) {
+      x_dfm <- quanteda::dfm(x)
+    } else {
+      x_dfm <- x
+    }
+
+    doc_lengths <- quanteda::ntoken(x_dfm)
+    valid_mask <- doc_lengths > 0
+    min_length <- if (any(valid_mask)) min(doc_lengths[valid_mask]) else 0
+
+    window_size <- min(100, max(10, min_length))
+
+    if (length(measures_to_use) > 0 && any(valid_mask)) {
+      if (all(valid_mask)) {
+        lexdiv_results <- suppressWarnings(
+          quanteda.textstats::textstat_lexdiv(
+            x_dfm,
+            measure = measures_to_use,
+            MATTR_window = window_size,
+            MSTTR_segment = window_size
+          )
+        )
+      } else {
+        x_valid <- quanteda::dfm_subset(x_dfm, valid_mask)
+        valid_results <- suppressWarnings(
+          quanteda.textstats::textstat_lexdiv(
+            x_valid,
+            measure = measures_to_use,
+            MATTR_window = min(100, max(10, min(quanteda::ntoken(x_valid)))),
+            MSTTR_segment = min(100, max(10, min(quanteda::ntoken(x_valid))))
+          )
+        )
+        lexdiv_results <- data.frame(document = quanteda::docnames(x_dfm))
+        for (m in measures_to_use) {
+          lexdiv_results[[m]] <- NA_real_
+          lexdiv_results[[m]][valid_mask] <- valid_results[[m]]
+        }
+      }
+    } else {
+      lexdiv_results <- data.frame(document = quanteda::docnames(x_dfm))
+    }
+
+    if (mtld_requested) {
+      tryCatch({
+        tokens_source <- if (is_tokens_input) x else seq_tokens
+
+        mtld_values <- vapply(seq_len(quanteda::ndoc(tokens_source)), function(i) {
+          .calc_mtld(as.character(tokens_source[[i]]))
+        }, numeric(1))
+
+        lexdiv_results$MTLD <- as.numeric(mtld_values)
+      }, error = function(e) {
+        message("MTLD calculation failed: ", e$message, ". Skipping MTLD.")
+      })
+    }
+
+    if (mattr_requested) {
+      tryCatch({
+        tokens_source <- if (is_tokens_input) x else seq_tokens
+        mattr_window <- min(window_size, min(quanteda::ntoken(tokens_source)))
+
+        mattr_values <- vapply(seq_len(quanteda::ndoc(tokens_source)), function(i) {
+          doc_tokens <- as.character(tokens_source[[i]])
+          n <- length(doc_tokens)
+          if (n < mattr_window) return(NA_real_)
+          ttrs <- vapply(seq_len(n - mattr_window + 1), function(j) {
+            length(unique(doc_tokens[j:(j + mattr_window - 1)])) / mattr_window
+          }, numeric(1))
+          mean(ttrs)
+        }, numeric(1))
+
+        lexdiv_results$MATTR <- as.numeric(mattr_values)
+      }, error = function(e) {
+        message("MATTR calculation failed: ", e$message, ". Skipping MATTR.")
+      })
+    }
+
+    if (msttr_requested) {
+      tryCatch({
+        tokens_source <- if (is_tokens_input) x else seq_tokens
+        msttr_segment <- min(50, min(quanteda::ntoken(tokens_source)))
+
+        msttr_values <- vapply(seq_len(quanteda::ndoc(tokens_source)), function(i) {
+          doc_tokens <- as.character(tokens_source[[i]])
+          n <- length(doc_tokens)
+          if (n < msttr_segment) return(NA_real_)
+          n_segments <- n %/% msttr_segment
+          if (n_segments < 1) return(NA_real_)
+          ttrs <- vapply(seq_len(n_segments), function(j) {
+            seg <- doc_tokens[((j - 1) * msttr_segment + 1):(j * msttr_segment)]
+            length(unique(seg)) / msttr_segment
+          }, numeric(1))
+          mean(ttrs)
+        }, numeric(1))
+
+        lexdiv_results$MSTTR <- as.numeric(msttr_values)
+      }, error = function(e) {
+        message("MSTTR calculation failed: ", e$message, ". Skipping MSTTR.")
+      })
+    }
+
+    if (hdd_requested) {
+      tryCatch({
+        tokens_source <- if (is_tokens_input) x else seq_tokens
+
+        hdd_values <- vapply(seq_len(quanteda::ndoc(tokens_source)), function(i) {
+          .calc_hdd(as.character(tokens_source[[i]]))
+        }, numeric(1))
+
+        lexdiv_results$HDD <- as.numeric(hdd_values)
+      }, error = function(e) {
+        message("HDD calculation failed: ", e$message, ". Skipping HDD.")
+      })
+    }
+
+    if (!"document" %in% names(lexdiv_results)) {
+      lexdiv_results$document <- quanteda::docnames(x)
+    }
+
+    # Standardize document names to "Doc 1, Doc 2..." format
+    lexdiv_results$document <- paste0("Doc ", seq_len(nrow(lexdiv_results)))
+
+    # Get actual column names from result (after MTLD is added)
+    actual_measures <- setdiff(names(lexdiv_results), "document")
+
+    # Select only columns that exist
+    cols_to_keep <- c("document", actual_measures)
+    lexdiv_results <- lexdiv_results[, cols_to_keep, drop = FALSE]
+
+    # Add Average Sentence Length if texts provided
+    if (!is.null(texts) && length(texts) == nrow(lexdiv_results)) {
+      # quanteda sentence tokenizer matches calculate_text_readability()
+      avg_sentence_length <- vapply(texts, function(t) {
+        sents <- quanteda::tokens(t, what = "sentence")[[1]]
+        sents <- sents[nzchar(trimws(sents))]
+        if (length(sents) == 0) return(NA_real_)
+        words <- sum(lengths(quanteda::tokens(sents, what = "word", remove_punct = TRUE)))
+        words / length(sents)
+      }, numeric(1))
+      lexdiv_results$`Avg Sentence Length` <- avg_sentence_length
+      actual_measures <- c(actual_measures, "Avg Sentence Length")
+    }
+
+    summary_stats <- list(
+      n_documents = nrow(lexdiv_results),
+      measures_calculated = actual_measures
+    )
+
+    for (measure in actual_measures) {
+      if (measure %in% names(lexdiv_results)) {
+        summary_stats[[paste0(measure, "_mean")]] <- mean(lexdiv_results[[measure]], na.rm = TRUE)
+        summary_stats[[paste0(measure, "_median")]] <- median(lexdiv_results[[measure]], na.rm = TRUE)
+        summary_stats[[paste0(measure, "_sd")]] <- sd(lexdiv_results[[measure]], na.rm = TRUE)
+      }
+    }
+
+    result <- list(
+      lexical_diversity = lexdiv_results,
+      summary_stats = summary_stats
+    )
+
+    # Store in cache if cache_key provided
+    if (!is.null(cache_key) && nzchar(cache_key)) {
+      cache_id <- paste0("lexdiv_", cache_key)
+      assign(cache_id, result, envir = .lexdiv_cache)
+    }
+
+    return(result)
+
+  }, error = function(e) {
+    stop("Error calculating lexical diversity: ", e$message)
+  })
+}
+
+
+#' Plot Lexical Diversity Distribution
+#'
+#' @description
+#' Creates a boxplot showing the distribution of a lexical diversity metric.
+#'
+#' @param lexdiv_data Data frame from lexical_diversity_analysis()
+#' @param metric Metric to plot. Recommended: "MTLD" or "MATTR" (text-length independent)
+#' @param title Plot title (default: auto-generated)
+#'
+#' @return A plotly boxplot
+#'
+#' @concept lexical
+#' @export
+#'
+#' @examples
+#' \donttest{
+#' abstracts <- TextAnalysisR::SpecialEduTech$abstract[1:10]
+#' tokens <- quanteda::tokens(quanteda::corpus(abstracts))
+#' diversity_result <- lexical_diversity_analysis(tokens, texts = abstracts)
+#' diversity_plot <- plot_lexical_diversity_distribution(
+#'   diversity_result$lexical_diversity, "MTLD"
+#' )
+#' print(diversity_plot)
+#' }
+plot_lexical_diversity_distribution <- function(lexdiv_data,
+                                               metric,
+                                               title = NULL) {
+
+  if (!metric %in% names(lexdiv_data)) {
+    stop(paste("Metric", metric, "not found in lexical diversity data"))
+  }
+
+  if (is.null(title)) {
+    title <- paste(metric, "- Overall Distribution")
+  }
+
+  metric_values <- lexdiv_data[[metric]]
+  metric_values <- metric_values[is.finite(metric_values)]
+
+  if (length(metric_values) == 0) {
+    return(
+      ggplot2::ggplot() +
+        ggplot2::annotate("text", x = 0.5, y = 0.5,
+                          label = "No valid data for selected metric",
+                          size = 5, color = "#ef4444") +
+        ggplot2::theme_void()
+    )
+  }
+
+  plot_df <- data.frame(
+    value = metric_values,
+    doc = paste("Doc", seq_along(metric_values)),
+    x = ""
+  )
+  plot_df$hover_text <- paste0("Document: ", plot_df$doc,
+                               "<br>", metric, ": ", round(plot_df$value, 4))
+
+  ggplot2::ggplot(plot_df, ggplot2::aes(x = x, y = value)) +
+    ggplot2::geom_boxplot(fill = "#8B5CF6", alpha = 0.7,
+                          color = "#0c1f4a", outlier.shape = NA) +
+    suppressWarnings(ggplot2::geom_jitter(ggplot2::aes(text = hover_text),
+                         width = 0.15, alpha = 0.5, color = "#0c1f4a", size = 1.8)) +
+    ggplot2::labs(y = metric, x = "", title = title) +
+    ggplot2::theme_minimal(base_size = 11) +
+    ggplot2::theme(
+      plot.title = ggplot2::element_text(size = 13, color = "#0c1f4a"),
+      axis.text = ggplot2::element_text(size = 11, color = "#3B3B3B"),
+      axis.title = ggplot2::element_text(size = 12, color = "#0c1f4a"),
+      axis.text.x = ggplot2::element_blank(),
+      axis.ticks.x = ggplot2::element_blank()
+    )
+
+}
+
+
+#' @title Lexical Frequency Analysis
+#'
+#' @description
+#' Wrapper function for plot_word_frequency for lexical analysis.
+#'
+#' @param ... Arguments passed to plot_word_frequency
+#'
+#' @return A plotly bar chart of word frequencies
+#'
+#' @concept lexical
+#' @export
+lexical_frequency_analysis <- function(...) {
+  return(plot_word_frequency(...))
+}
+
+
+
+#' @title Plot Word Frequency
+#'
+#' @description
+#' Creates a bar plot showing the most frequent words in a document-feature matrix (dfm).
+#'
+#' @param dfm_object A document-feature matrix created by quanteda::dfm().
+#' @param n The number of top words to display (default: 20).
+#' @param height Plot height in pixels (default: 800). Kept for backward compatibility.
+#' @param width Plot width in pixels (default: 1000). Kept for backward compatibility.
+#' @param ... Additional arguments (kept for backward compatibility).
+#'
+#' @return A ggplot object showing word frequency.
+#'
+#' @concept visualization
+#' @export
+#'
+#' @examples
+#' \donttest{
+#'   data(SpecialEduTech, package = "TextAnalysisR")
+#'   texts <- SpecialEduTech$abstract[1:10]
+#'   dfm <- quanteda::dfm(quanteda::tokens(texts))
+#'   plot <- plot_word_frequency(dfm, n = 10)
+#'   print(plot)
+#' }
+plot_word_frequency <- function(dfm_object,
+                                n = 20,
+                                height = NULL,
+                                width = NULL,
+                                ...) {
+
+  if (!inherits(dfm_object, "dfm")) {
+    stop("Input must be a quanteda dfm object")
+  }
+
+  freq_df <- quanteda.textstats::textstat_frequency(dfm_object, n = n) %>%
+    dplyr::mutate(
+      feature = stats::reorder(feature, frequency)
+    )
+
+  ggplot_obj <- ggplot2::ggplot(freq_df,
+                                ggplot2::aes(x = feature, y = frequency,
+                                            text = paste("Word:", feature,
+                                                       "<br>Frequency:", frequency))) +
+    ggplot2::geom_point(color = "#0c1f4a", size = 2.5, alpha = 0.9) +
+    ggplot2::scale_x_discrete(expand = ggplot2::expansion(add = 0.5)) +
+    ggplot2::coord_flip() +
+    ggplot2::labs(x = "", y = "Frequency") +
+    ggplot2::theme_minimal(base_size = 11) +
+    ggplot2::theme(
+      panel.grid.major.x = ggplot2::element_blank(),
+      panel.grid.major.y = ggplot2::element_line(color = "#E0E0E0", linewidth = 0.3),
+      panel.grid.minor = ggplot2::element_blank(),
+      axis.line.x = ggplot2::element_line(color = "#3B3B3B", linewidth = 0.3),
+      axis.line.y = ggplot2::element_blank(),
+      axis.ticks.x = ggplot2::element_line(color = "#3B3B3B", linewidth = 0.3),
+      axis.ticks.y = ggplot2::element_blank(),
+      axis.text.x = ggplot2::element_text(size = 11, color = "#3B3B3B", margin = ggplot2::margin(t = 3)),
+      axis.text.y = ggplot2::element_text(size = 11, color = "#3B3B3B", margin = ggplot2::margin(r = 3)),
+      axis.title = ggplot2::element_text(size = 12, color = "#0c1f4a"),
+      axis.title.x = ggplot2::element_text(margin = ggplot2::margin(t = 5)),
+      axis.title.y = ggplot2::element_text(margin = ggplot2::margin(r = 5)),
+      plot.margin = ggplot2::margin(t = 5, r = 10, b = 5, l = 5)
+    )
+
+  ggplot_obj
+}
+
+
+#' Plot N-gram Frequency
+#'
+#' @description
+#' Creates a bar plot showing n-gram frequencies with optional highlighting
+#' of selected n-grams. Supports both detected n-grams and selected multi-word expressions.
+#'
+#' @param ngram_data Data frame containing n-gram data with columns:
+#'   \itemize{
+#'     \item \code{collocation}: The n-gram text
+#'     \item \code{count}: Frequency count
+#'     \item \code{lambda}: (optional) Lambda statistic
+#'     \item \code{z}: (optional) Z-score statistic
+#'   }
+#' @param top_n Number of top n-grams to display (default: 30)
+#' @param selected Character vector of selected n-grams to highlight (default: NULL)
+#' @param title Plot title (default: "N-gram Frequency")
+#' @param highlight_color Color for highlighted bars (default: "#10B981")
+#' @param default_color Color for non-highlighted bars (default: "#6B7280")
+#' @param height Plot height in pixels (default: 500)
+#' @param width Plot width in pixels (default: NULL for auto)
+#' @param show_stats Whether to show lambda and z-score in hover (default: TRUE)
+#'
+#' @return A plotly object
+#'
+#' @concept visualization
+#' @export
+#'
+#' @examples
+#' \donttest{
+#'   ngram_df <- data.frame(
+#'     collocation = c("machine learning", "deep learning", "neural network"),
+#'     count = c(150, 120, 90),
+#'     lambda = c(5.2, 4.8, 4.1),
+#'     z = c(12.3, 10.5, 9.2)
+#'   )
+#'   plot_ngram_frequency(ngram_df, selected = c("machine learning"))
+#' }
+plot_ngram_frequency <- function(ngram_data,
+                                  top_n = 30,
+                                  selected = NULL,
+                                  title = "N-gram Frequency",
+                                  highlight_color = "#10B981",
+                                  default_color = "#6B7280",
+                                  height = 500,
+                                  width = NULL,
+                                  show_stats = TRUE) {
+
+  if (is.null(ngram_data) || nrow(ngram_data) == 0) {
+    return(
+      ggplot2::ggplot() +
+        ggplot2::annotate("text", x = 0.5, y = 0.5,
+                          label = "No n-grams detected. Adjust parameters and click 'Detect N-grams'",
+                          size = 5, color = "#ef4444") +
+        ggplot2::theme_void()
+    )
+  }
+
+  top_ngrams <- utils::head(ngram_data, top_n)
+
+  top_ngrams <- top_ngrams %>%
+    dplyr::mutate(
+      order_rank = dplyr::row_number(),
+      collocation_ordered = factor(collocation, levels = rev(collocation))
+    )
+
+  is_selected <- if (!is.null(selected)) {
+    top_ngrams$collocation %in% selected
+  } else {
+    rep(FALSE, nrow(top_ngrams))
+  }
+
+  top_ngrams$bar_fill <- ifelse(is_selected, highlight_color, default_color)
+  top_ngrams$bar_border <- ifelse(is_selected, "#337ab7", "#4B5563")
+
+  top_ngrams$hover_text <- if (show_stats && "lambda" %in% names(top_ngrams) && "z" %in% names(top_ngrams)) {
+    paste0(top_ngrams$collocation, "\nFrequency: ", top_ngrams$count,
+           "\nLambda: ", round(top_ngrams$lambda, 2),
+           "\nZ-score: ", round(top_ngrams$z, 2))
+  } else {
+    paste0(top_ngrams$collocation, "\nFrequency: ", top_ngrams$count)
+  }
+
+  ggplot2::ggplot(top_ngrams, ggplot2::aes(x = collocation_ordered, y = count,
+                                            text = hover_text)) +
+    ggplot2::geom_col(fill = top_ngrams$bar_fill, color = top_ngrams$bar_border,
+                      linewidth = 0.3) +
+    ggplot2::labs(x = "", y = "Frequency", title = title) +
+    ggplot2::theme_minimal(base_size = 11) +
+    ggplot2::theme(
+      plot.title = ggplot2::element_text(size = 13, color = "#0c1f4a"),
+      axis.text.x = ggplot2::element_text(size = 11, color = "#3B3B3B", angle = -45, hjust = 0),
+      axis.text.y = ggplot2::element_text(size = 11, color = "#3B3B3B"),
+      axis.title = ggplot2::element_text(size = 12, color = "#0c1f4a")
+    )
+}
+
+
+#' Plot Multi-Word Expression Frequency
+#'
+#' @description
+#' Creates a bar plot showing multi-word expression frequencies with optional
+#' source-based coloring to distinguish between detected and manually added expressions.
+#'
+#' @param mwe_data Data frame containing MWE data with columns:
+#'   \itemize{
+#'     \item \code{feature}: The multi-word expression text
+#'     \item \code{frequency}: Frequency count
+#'     \item \code{rank}: (optional) Rank of the expression
+#'     \item \code{docfreq}: (optional) Document frequency
+#'     \item \code{source}: (optional) Source category (e.g., "Top 20", "Manual")
+#'   }
+#' @param title Plot title (default: "Multi-Word Expression Frequency")
+#' @param color_by_source Whether to color bars by source column (default: TRUE)
+#' @param primary_color Color for primary/top expressions (default: "#10B981")
+#' @param secondary_color Color for secondary/manual expressions (default: "#A855F7")
+#' @param height Plot height in pixels (default: 500)
+#' @param width Plot width in pixels (default: NULL for auto)
+#'
+#' @return A plotly object
+#'
+#' @concept visualization
+#' @export
+plot_mwe_frequency <- function(mwe_data,
+                                title = "Multi-Word Expression Frequency",
+                                color_by_source = TRUE,
+                                primary_color = "#10B981",
+                                secondary_color = "#A855F7",
+                                height = 500,
+                                width = NULL) {
+
+  if (is.null(mwe_data) || nrow(mwe_data) == 0) {
+    return(
+      ggplot2::ggplot() +
+        ggplot2::annotate("text", x = 0.5, y = 0.5,
+                          label = "No multi-word expressions found",
+                          size = 5, color = "#ef4444") +
+        ggplot2::theme_void()
+    )
+  }
+
+  if (color_by_source && "source" %in% names(mwe_data)) {
+    mwe_data$bar_fill <- ifelse(mwe_data$source == "Top 20", primary_color, secondary_color)
+  } else {
+    mwe_data$bar_fill <- primary_color
+  }
+
+  mwe_data$hover_text <- if (all(c("rank", "docfreq", "source") %in% names(mwe_data))) {
+    paste0(mwe_data$feature, "\nFrequency: ", mwe_data$frequency,
+           "\nRank: ", mwe_data$rank,
+           "\nDoc Frequency: ", mwe_data$docfreq,
+           "\nSource: ", mwe_data$source)
+  } else {
+    paste0(mwe_data$feature, "\nFrequency: ", mwe_data$frequency)
+  }
+
+  mwe_data$feature_ordered <- stats::reorder(mwe_data$feature, mwe_data$frequency)
+
+  ggplot2::ggplot(mwe_data, ggplot2::aes(x = feature_ordered, y = frequency,
+                                          text = hover_text)) +
+    ggplot2::geom_col(fill = mwe_data$bar_fill) +
+    ggplot2::labs(x = "", y = "Frequency", title = title) +
+    ggplot2::theme_minimal(base_size = 11) +
+    ggplot2::theme(
+      plot.title = ggplot2::element_text(size = 13, color = "#0c1f4a"),
+      axis.text.x = ggplot2::element_text(size = 11, color = "#3B3B3B", angle = -45, hjust = 0),
+      axis.text.y = ggplot2::element_text(size = 11, color = "#3B3B3B"),
+      axis.title = ggplot2::element_text(size = 12, color = "#0c1f4a")
+    )
+}
+
+
+
+# Keyword extraction
+
+#' Extract Keywords Using TF-IDF
+#'
+#' @description
+#' Extracts top keywords from a document-feature matrix using TF-IDF weighting.
+#' Uses quanteda's default scheme (raw term counts, base-10 idf), which
+#' differs from tidytext's proportion-based tf; rankings favor terms in
+#' longer documents.
+#'
+#' @param dfm A quanteda dfm object
+#' @param top_n Number of top keywords to extract (default: 20)
+#' @param normalize Logical, whether to normalize TF-IDF scores to 0-1 range (default: FALSE)
+#'
+#' @return Data frame with columns: Keyword, TF_IDF_Score, Frequency
+#'
+#' @concept lexical
+#' @export
+#'
+#' @examples
+#' \donttest{
+#'   library(quanteda)
+#'   corp <- corpus(c("text analysis", "data mining", "text mining"))
+#'   dfm_obj <- dfm(tokens(corp))
+#'   keywords <- extract_keywords_tfidf(dfm_obj, top_n = 5)
+#'   print(keywords)
+#' }
+extract_keywords_tfidf <- function(dfm,
+                                   top_n = 20,
+                                   normalize = FALSE) {
+
+  if (!requireNamespace("quanteda", quietly = TRUE)) {
+    stop("Package 'quanteda' is required.")
+  }
+
+  tfidf <- quanteda::dfm_tfidf(dfm)
+
+  feature_scores <- colSums(as.matrix(tfidf))
+  feature_freq <- colSums(as.matrix(dfm))
+
+  if (normalize) {
+    max_score <- max(feature_scores)
+    if (max_score > 0) {
+      feature_scores <- feature_scores / max_score
+    }
+  }
+
+  top_features <- sort(feature_scores, decreasing = TRUE)[seq_len(min(top_n, length(feature_scores)))]
+
+  data.frame(
+    Keyword = names(top_features),
+    TF_IDF_Score = unname(top_features),
+    Frequency = unname(feature_freq[names(top_features)]),
+    stringsAsFactors = FALSE,
+    row.names = NULL
+  )
+}
+
+
+#' Extract Keywords Using Statistical Keyness
+#'
+#' @description
+#' Extracts distinctive keywords by comparing document groups using log-likelihood ratio (G-squared).
+#'
+#' @param dfm A quanteda dfm object
+#' @param target Target document indices or logical vector
+#' @param top_n Number of top keywords to extract (default: 20)
+#' @param measure Keyness measure: "lr" (log-likelihood G-squared), "chi2",
+#'   "exact" (Fisher's exact odds ratio), or "pmi" (default: "lr")
+#' @param min_count Minimum total term frequency before computing keyness
+#'   (default: 0, no pruning)
+#'
+#' @return Data frame with columns: Keyword, Keyness_Score
+#'
+#' @concept lexical
+#' @export
+#'
+#' @examples
+#' \donttest{
+#' abstracts <- TextAnalysisR::SpecialEduTech$abstract[1:10]
+#' dfm_object <- quanteda::dfm(quanteda::tokens(quanteda::corpus(abstracts)))
+#' keywords <- extract_keywords_keyness(dfm_object, target = 1)
+#' print(keywords)
+#' }
+extract_keywords_keyness <- function(dfm,
+                                     target,
+                                     top_n = 20,
+                                     measure = "lr",
+                                     min_count = 0) {
+
+  measure <- match.arg(measure, c("lr", "chi2", "exact", "pmi"))
+
+  if (!requireNamespace("quanteda.textstats", quietly = TRUE)) {
+    stop("Package 'quanteda.textstats' is required.")
+  }
+
+  if (quanteda::ndoc(dfm) < 2) {
+    return(data.frame(
+      Keyword = character(),
+      Keyness_Score = numeric(),
+      stringsAsFactors = FALSE
+    ))
+  }
+
+  # keyness statistics are unstable for very low-frequency terms
+  if (min_count > 0) {
+    dfm <- quanteda::dfm_trim(dfm, min_termfreq = min_count)
+  }
+
+  keyness <- quanteda.textstats::textstat_keyness(
+    dfm,
+    target = target,
+    measure = measure
+  )
+
+  score_col <- switch(measure, lr = "G2", chi2 = "chi2", exact = "exact", pmi = "pmi")
+  keyness_top <- head(keyness[order(-abs(keyness[[score_col]])), ], min(top_n, nrow(keyness)))
+
+  data.frame(
+    Keyword = keyness_top$feature,
+    Keyness_Score = keyness_top[[score_col]],
+    stringsAsFactors = FALSE,
+    row.names = NULL
+  )
+}
+
+
+#' Plot TF-IDF Keywords
+#'
+#' @description
+#' Creates a horizontal bar plot of top keywords by TF-IDF score.
+#'
+#' @param tfidf_data Data frame from extract_keywords_tfidf()
+#' @param title Plot title (default: "Top Keywords by TF-IDF Score")
+#' @param normalized Logical, whether scores are normalized (for label) (default: FALSE)
+#'
+#' @return A plotly bar chart
+#'
+#' @concept lexical
+#' @export
+plot_tfidf_keywords <- function(tfidf_data,
+                                 title = NULL,
+                                 normalized = FALSE) {
+
+  tfidf_data_sorted <- tfidf_data[order(tfidf_data$TF_IDF_Score, decreasing = FALSE), ]
+
+  score_label <- if (normalized) "TF-IDF Score (Normalized)" else "TF-IDF Score"
+
+  if (is.null(title)) {
+    title <- paste("Top Keywords by", score_label)
+  }
+
+  tfidf_data_sorted$Keyword_ordered <- factor(tfidf_data_sorted$Keyword,
+                                               levels = tfidf_data_sorted$Keyword)
+
+  tfidf_data_sorted$hover_text <- paste0("Keyword: ", tfidf_data_sorted$Keyword,
+                                          "\n", score_label, ": ",
+                                          round(tfidf_data_sorted$TF_IDF_Score, 4),
+                                          "\nFrequency: ", tfidf_data_sorted$Frequency)
+
+  ggplot2::ggplot(tfidf_data_sorted, ggplot2::aes(x = TF_IDF_Score, y = Keyword_ordered,
+                                                    text = hover_text)) +
+    ggplot2::geom_col(fill = "#337ab7") +
+    ggplot2::labs(x = score_label, y = "", title = title) +
+    ggplot2::theme_minimal(base_size = 11) +
+    ggplot2::theme(
+      plot.title = ggplot2::element_text(size = 13, color = "#0c1f4a"),
+      axis.text = ggplot2::element_text(size = 11, color = "#3B3B3B"),
+      axis.title = ggplot2::element_text(size = 12, color = "#0c1f4a")
+    )
+}
+
+
+#' Plot Statistical Keyness
+#'
+#' @description
+#' Creates a horizontal bar plot of distinctive keywords by keyness score.
+#'
+#' @param keyness_data Data frame from extract_keywords_keyness()
+#' @param title Plot title (default: "Top Keywords by Keyness (G-squared)")
+#' @param group_label Optional label for the target group (default: NULL)
+#'
+#' @return A plotly bar chart
+#'
+#' @concept lexical
+#' @export
+plot_keyness_keywords <- function(keyness_data,
+                                  title = NULL,
+                                  group_label = NULL) {
+
+  if (nrow(keyness_data) == 0) {
+    return(
+      ggplot2::ggplot() +
+        ggplot2::annotate("text", x = 0.5, y = 0.5,
+                          label = "Keyness analysis requires multiple documents",
+                          size = 5, color = "#ef4444") +
+        ggplot2::theme_void()
+    )
+  }
+
+  keyness_data_sorted <- keyness_data[order(abs(keyness_data$Keyness_Score), decreasing = FALSE), ]
+
+  if (is.null(title)) {
+    title <- if (!is.null(group_label)) {
+      paste0("Top Keywords by Keyness (G\u00b2) - Grouped by ", group_label)
+    } else {
+      "Top Keywords by Keyness (G\u00b2)"
+    }
+  }
+
+  keyness_data_sorted$Keyword_ordered <- factor(keyness_data_sorted$Keyword,
+                                                 levels = keyness_data_sorted$Keyword)
+
+  keyness_data_sorted$hover_text <- paste0("Keyword: ", keyness_data_sorted$Keyword,
+                                            "\nKeyness Score (G\u00b2): ",
+                                            round(keyness_data_sorted$Keyness_Score, 2))
+
+  ggplot2::ggplot(keyness_data_sorted, ggplot2::aes(x = Keyness_Score, y = Keyword_ordered,
+                                                     text = hover_text)) +
+    ggplot2::geom_col(fill = "#337ab7") +
+    ggplot2::labs(x = "Keyness Score (G\u00b2)", y = "", title = title) +
+    ggplot2::theme_minimal(base_size = 11) +
+    ggplot2::theme(
+      plot.title = ggplot2::element_text(size = 13, color = "#0c1f4a"),
+      axis.text = ggplot2::element_text(size = 11, color = "#3B3B3B"),
+      axis.title = ggplot2::element_text(size = 12, color = "#0c1f4a")
+    )
+}
+
+
+#' Plot Keyword Comparison (TF-IDF vs Frequency)
+#'
+#' @description
+#' Creates a grouped bar plot comparing TF-IDF scores with term frequencies.
+#'
+#' @param tfidf_data Data frame from extract_keywords_tfidf()
+#' @param top_n Number of keywords to display (default: 10)
+#' @param title Plot title (default: auto-generated)
+#' @param normalized Logical, whether TF-IDF scores are normalized (default: FALSE)
+#'
+#' @return A plotly grouped bar chart
+#'
+#' @concept lexical
+#' @export
+plot_keyword_comparison <- function(tfidf_data,
+                                    top_n = 10,
+                                    title = NULL,
+                                    normalized = FALSE) {
+
+  top_keywords <- head(tfidf_data, top_n)
+
+  score_label <- if (normalized) "TF-IDF Score (Normalized)" else "TF-IDF Score"
+
+  if (is.null(title)) {
+    title <- paste0("Top Keywords: ", score_label, " vs Frequency")
+  }
+
+  top_keywords$Freq_scaled <- top_keywords$Frequency / max(top_keywords$Frequency) *
+    max(top_keywords$TF_IDF_Score)
+
+  plot_long <- rbind(
+    data.frame(Keyword = top_keywords$Keyword,
+               Score = top_keywords$TF_IDF_Score,
+               Metric = "TF-IDF",
+               stringsAsFactors = FALSE),
+    data.frame(Keyword = top_keywords$Keyword,
+               Score = top_keywords$Freq_scaled,
+               Metric = "Frequency",
+               stringsAsFactors = FALSE)
+  )
+  plot_long$Keyword <- factor(plot_long$Keyword, levels = top_keywords$Keyword)
+  plot_long$hover_text <- paste("Keyword:", plot_long$Keyword,
+                                "<br>Metric:", plot_long$Metric,
+                                "<br>Score:", round(plot_long$Score, 4))
+
+  ggplot2::ggplot(plot_long, ggplot2::aes(x = Keyword, y = Score, fill = Metric, text = hover_text)) +
+    ggplot2::geom_col(position = "dodge") +
+    ggplot2::scale_fill_manual(values = c("TF-IDF" = "#337ab7", "Frequency" = "#5cb85c")) +
+    ggplot2::labs(x = "Keywords", y = "Score", title = title) +
+    ggplot2::theme_minimal(base_size = 11) +
+    ggplot2::theme(
+      plot.title = ggplot2::element_text(size = 13, color = "#0c1f4a"),
+      axis.text.x = ggplot2::element_text(size = 11, color = "#3B3B3B", angle = -45, hjust = 0),
+      axis.text.y = ggplot2::element_text(size = 11, color = "#3B3B3B"),
+      axis.title = ggplot2::element_text(size = 12, color = "#0c1f4a"),
+      legend.title = ggplot2::element_text(size = 12, color = "#0c1f4a"),
+      legend.text = ggplot2::element_text(size = 12, color = "#3B3B3B"),
+      legend.position = "right"
+    )
+}
+
+
+
+# Readability
+
+# Readability Analysis Functions
+#
+# Functions for calculating and visualizing text readability metrics.
+
+#' Plot Readability Distribution
+#'
+#' @description
+#' Creates a boxplot showing the overall distribution of a readability metric.
+#'
+#' @param readability_data Data frame from calculate_text_readability()
+#' @param metric Metric to plot (e.g., "flesch", "flesch_kincaid", "gunning_fog")
+#' @param title Plot title (default: auto-generated)
+#'
+#' @return A plotly boxplot
+#'
+#' @concept lexical
+#' @export
+#'
+#' @examples
+#' \donttest{
+#' data(SpecialEduTech, package = "TextAnalysisR")
+#' texts <- SpecialEduTech$abstract[1:20]
+#' readability <- calculate_text_readability(texts)
+#' plot <- plot_readability_distribution(readability, "flesch")
+#' print(plot)
+#' }
+plot_readability_distribution <- function(readability_data,
+                                          metric,
+                                          title = NULL) {
+
+  if (!metric %in% names(readability_data)) {
+    stop(paste("Metric", metric, "not found in readability data"))
+  }
+
+  if (is.null(title)) {
+    title <- paste(metric, "- Overall Distribution")
+  }
+
+  metric_values <- readability_data[[metric]]
+  metric_values <- metric_values[is.finite(metric_values)]
+
+  if (length(metric_values) == 0) {
+    return(
+      ggplot2::ggplot() +
+        ggplot2::annotate("text", x = 0.5, y = 0.5,
+                          label = "No valid data for selected metric",
+                          size = 5, color = "#ef4444") +
+        ggplot2::theme_void()
+    )
+  }
+
+  plot_df <- data.frame(
+    value = metric_values,
+    doc = paste("Doc", seq_along(metric_values)),
+    x = ""
+  )
+  plot_df$hover_text <- paste0("Document: ", plot_df$doc,
+                               "<br>", metric, ": ", round(plot_df$value, 2))
+
+  ggplot2::ggplot(plot_df, ggplot2::aes(x = x, y = value)) +
+    ggplot2::geom_boxplot(fill = "#4A90E2", alpha = 0.7,
+                          color = "#0c1f4a", outlier.shape = NA) +
+    suppressWarnings(ggplot2::geom_jitter(ggplot2::aes(text = hover_text),
+                         width = 0.15, alpha = 0.5, color = "#0c1f4a", size = 1.8)) +
+    ggplot2::labs(y = metric, x = "", title = title) +
+    ggplot2::theme_minimal(base_size = 11) +
+    ggplot2::theme(
+      plot.title = ggplot2::element_text(size = 13, color = "#0c1f4a"),
+      axis.text = ggplot2::element_text(size = 11, color = "#3B3B3B"),
+      axis.title = ggplot2::element_text(size = 12, color = "#0c1f4a"),
+      axis.text.x = ggplot2::element_blank(),
+      axis.ticks.x = ggplot2::element_blank()
+    )
+
+}
+
+
+#' Plot Readability by Group
+#'
+#' @description
+#' Creates grouped boxplots comparing readability across categories.
+#'
+#' @param readability_data Data frame from calculate_text_readability()
+#' @param metric Metric to plot
+#' @param group_var Name of grouping variable column
+#' @param title Plot title (default: auto-generated)
+#'
+#' @return A plotly boxplot
+#'
+#' @concept lexical
+#' @export
+plot_readability_by_group <- function(readability_data,
+                                      metric,
+                                      group_var,
+                                      title = NULL) {
+
+  if (!metric %in% names(readability_data)) {
+    stop(paste("Metric", metric, "not found in readability data"))
+  }
+
+  if (!group_var %in% names(readability_data)) {
+    stop(paste("Group variable", group_var, "not found in data"))
+  }
+
+  if (is.null(title)) {
+    title <- paste(metric, "by", group_var)
+  }
+
+  plot_data <- readability_data[, c(metric, group_var)]
+  names(plot_data) <- c("metric_value", "group")
+
+  plot_data$metric_value <- round(plot_data$metric_value, 2)
+  plot_data <- plot_data[is.finite(plot_data$metric_value), ]
+
+  colors <- c("#4A90E2", "#E74C3C", "#2ECC71", "#F39C12", "#9B59B6",
+              "#1ABC9C", "#E67E22", "#3498DB")
+
+  unique_groups <- unique(plot_data$group)
+
+  plot_data$hover_text <- paste0(group_var, ": ", plot_data$group,
+                                 "<br>", metric, ": ", plot_data$metric_value)
+
+  ggplot2::ggplot(plot_data, ggplot2::aes(x = group, y = metric_value, fill = group)) +
+    ggplot2::geom_boxplot(alpha = 0.7, outlier.shape = NA) +
+    suppressWarnings(ggplot2::geom_jitter(ggplot2::aes(text = hover_text),
+                         width = 0.15, alpha = 0.5, color = "#0c1f4a", size = 1.8)) +
+    ggplot2::scale_fill_manual(values = colors[seq_along(unique_groups)]) +
+    ggplot2::labs(x = group_var, y = metric, title = title) +
+    ggplot2::theme_minimal(base_size = 11) +
+    ggplot2::theme(
+      plot.title = ggplot2::element_text(size = 13, color = "#0c1f4a"),
+      axis.text = ggplot2::element_text(size = 11, color = "#3B3B3B"),
+      axis.title = ggplot2::element_text(size = 12, color = "#0c1f4a"),
+      legend.position = "none"
+    )
+}
+
+
+#' Plot Top Documents by Readability
+#'
+#' @description
+#' Creates a bar plot of documents ranked by readability metric.
+#'
+#' @param readability_data Data frame from calculate_text_readability()
+#' @param metric Metric to plot
+#' @param top_n Number of documents to show (default: 15)
+#' @param order Direction: "highest" or "lowest" (default: "highest")
+#' @param title Plot title (default: auto-generated)
+#'
+#' @return A plotly bar chart
+#'
+#' @concept lexical
+#' @export
+plot_top_readability_documents <- function(readability_data,
+                                           metric,
+                                           top_n = 15,
+                                           order = "highest",
+                                           title = NULL) {
+
+  if (!metric %in% names(readability_data)) {
+    stop(paste("Metric", metric, "not found in readability data"))
+  }
+
+  doc_col <- if ("Document" %in% names(readability_data)) "Document" else "document"
+
+  sorted_data <- readability_data %>%
+    dplyr::arrange(if (order == "highest") dplyr::desc(.data[[metric]]) else .data[[metric]]) %>%
+    head(top_n)
+
+  if (is.null(title)) {
+    title <- paste("Top", top_n, "Documents by", metric)
+  }
+
+  sorted_data$doc_label <- sorted_data[[doc_col]]
+  sorted_data$doc_ordered <- factor(sorted_data$doc_label,
+                                     levels = rev(sorted_data$doc_label))
+  sorted_data$metric_val <- sorted_data[[metric]]
+  sorted_data$hover_text <- paste0(sorted_data$doc_label, "\n",
+                                    metric, ": ", round(sorted_data$metric_val, 2))
+
+  ggplot2::ggplot(sorted_data, ggplot2::aes(x = doc_ordered, y = metric_val,
+                                             text = hover_text)) +
+    ggplot2::geom_col(fill = "#4A90E2") +
+    ggplot2::coord_flip() +
+    ggplot2::labs(x = "Document", y = metric, title = title) +
+    ggplot2::theme_minimal(base_size = 11) +
+    ggplot2::theme(
+      plot.title = ggplot2::element_text(size = 13, color = "#0c1f4a"),
+      axis.text = ggplot2::element_text(size = 11, color = "#3B3B3B"),
+      axis.title = ggplot2::element_text(size = 12, color = "#0c1f4a")
+    )
+}
+
+#' Calculate Text Readability
+#'
+#' @description
+#' Calculates multiple readability metrics for texts including Flesch Reading Ease,
+#' Flesch-Kincaid Grade Level, Gunning FOG index, and others. Optionally includes
+#' lexical diversity metrics and sentence statistics.
+#'
+#' @param texts Character vector of texts to analyze
+#' @param metrics Character vector of readability metrics to calculate.
+#'   Options: "flesch", "flesch_kincaid", "gunning_fog", "smog", "ari", "coleman_liau"
+#' @param include_lexical_diversity Logical, include the MTLD lexical diversity
+#'   index (default: TRUE)
+#' @param include_sentence_stats Logical, include average sentence length (default: TRUE)
+#' @param doc_names Optional character vector of document names
+#'
+#' @return A data frame with document names and readability scores
+#'
+#' @concept lexical
+#' @export
+#'
+#' @examples
+#' \donttest{
+#' data(SpecialEduTech, package = "TextAnalysisR")
+#' texts <- SpecialEduTech$abstract[1:10]
+#' readability <- calculate_text_readability(texts)
+#' print(readability)
+#' }
+#'
+#' @importFrom quanteda corpus tokens dfm docnames
+#' @importFrom quanteda.textstats textstat_readability textstat_lexdiv
+calculate_text_readability <- function(texts,
+                                      metrics = c("flesch", "flesch_kincaid", "gunning_fog"),
+                                      include_lexical_diversity = TRUE,
+                                      include_sentence_stats = TRUE,
+                                      doc_names = NULL) {
+
+  if (!requireNamespace("quanteda.textstats", quietly = TRUE)) {
+    stop("Package 'quanteda.textstats' is required. Please install it.")
+  }
+
+  if (is.null(doc_names)) {
+    doc_names <- paste0("Doc ", seq_along(texts))
+  }
+
+  corp <- quanteda::corpus(texts)
+  quanteda::docnames(corp) <- doc_names
+
+  measure_map <- c(
+    "flesch" = "Flesch",
+    "flesch_kincaid" = "Flesch.Kincaid",
+    "gunning_fog" = "FOG",
+    "smog" = "SMOG",
+    "ari" = "ARI",
+    "coleman_liau" = "Coleman.Liau.short"
+  )
+
+  valid_metrics <- intersect(metrics, names(measure_map))
+  if (length(valid_metrics) == 0) {
+    stop("No valid metrics specified. Available metrics: ",
+         paste(names(measure_map), collapse = ", "))
+  }
+
+  mapped_metrics <- measure_map[valid_metrics]
+  names(mapped_metrics) <- valid_metrics
+
+  # Batch all readability metrics in single call for performance
+  all_scores <- list()
+  tryCatch({
+    # Call textstat_readability once with all measures
+    batch_scores <- quanteda.textstats::textstat_readability(corp, measure = unname(mapped_metrics))
+
+    # Extract scores for each metric
+    for (i in seq_along(valid_metrics)) {
+      metric <- valid_metrics[i]
+      measure_name <- mapped_metrics[i]
+      if (measure_name %in% names(batch_scores)) {
+        all_scores[[metric]] <- batch_scores[[measure_name]]
+      } else {
+        all_scores[[metric]] <- rep(NA, length(texts))
+      }
+    }
+  }, error = function(e) {
+    # Fallback to individual calls if batch fails
+    warning("Batch readability calculation failed, falling back to individual metrics: ", e$message)
+    for (i in seq_along(valid_metrics)) {
+      metric <- valid_metrics[i]
+      measure_name <- mapped_metrics[i]
+      all_scores[[metric]] <- tryCatch({
+        quanteda.textstats::textstat_readability(corp, measure = measure_name)[[2]]
+      }, error = function(e2) {
+        warning(paste("Could not calculate", metric, ":", e2$message))
+        rep(NA, length(texts))
+      })
+    }
+  })
+
+  readability_scores <- data.frame(Document = doc_names, stringsAsFactors = FALSE)
+  for (metric in names(all_scores)) {
+    readability_scores[[metric]] <- all_scores[[metric]]
+  }
+
+  if (include_lexical_diversity) {
+    # MTLD needs token order; compute per document, not from a DFM
+    toks <- quanteda::tokens(texts, remove_punct = TRUE)
+    mtld_values <- vapply(seq_len(quanteda::ndoc(toks)), function(i) {
+      .calc_mtld(as.character(toks[[i]]))
+    }, numeric(1))
+    readability_scores$`Lexical Diversity (MTLD)` <- as.numeric(mtld_values)
+  }
+
+  if (include_sentence_stats) {
+    avg_sentence_length <- vapply(texts, function(t) {
+      sents <- quanteda::tokens(t, what = "sentence")[[1]]
+      sents <- sents[nzchar(trimws(sents))]
+      if (length(sents) == 0) return(NA_real_)
+      words <- lengths(quanteda::tokens(sents, what = "word", remove_punct = TRUE))
+      sum(words) / length(sents)
+    }, numeric(1))
+    readability_scores$`Avg Sentence Length` <- avg_sentence_length
+  }
+
+  return(readability_scores)
+}
+
+
+
+
+#' Plot Term Frequency Trends by Continuous Variable
+#'
+#' @description
+#' Creates a faceted line plot showing how term frequencies vary across
+#' a continuous variable (e.g., year, time period).
+#'
+#' @param term_data Data frame containing term frequencies with columns:
+#'   continuous_var, term, and word_frequency
+#' @param continuous_var Name of the continuous variable column
+#' @param terms Character vector of terms to display (optional, filters if provided)
+#' @param title Plot title (default: NULL, auto-generated)
+#' @param height Plot height in pixels (default: 600)
+#' @param width Plot width in pixels (default: NULL, auto)
+#'
+#' @return A plotly object with faceted line plots
+#'
+#' @concept visualization
+#' @export
+#'
+#' @examples
+#' \donttest{
+#' term_df <- data.frame(
+#'   year = rep(2010:2020, each = 3),
+#'   term = rep(c("learning", "education", "technology"), 11),
+#'   word_frequency = sample(10:100, 33, replace = TRUE)
+#' )
+#' plot_term_trends_continuous(term_df, "year", c("learning", "education"))
+#' }
+plot_term_trends_continuous <- function(term_data,
+                                         continuous_var,
+                                         terms = NULL,
+                                         title = NULL,
+                                         height = 600,
+                                         width = NULL) {
+
+  if (!requireNamespace("scales", quietly = TRUE)) {
+    stop("Package 'scales' is required. Please install it.")
+  }
+
+  if (!continuous_var %in% names(term_data)) {
+    stop("Continuous variable '", continuous_var, "' not found in data")
+  }
+
+  if (!"term" %in% names(term_data) && !"word" %in% names(term_data)) {
+    stop("term or word column not found in data")
+  }
+
+  if ("word" %in% names(term_data) && !"term" %in% names(term_data)) {
+    term_data$term <- term_data$word
+  }
+
+  if (!"word_frequency" %in% names(term_data) && !"count" %in% names(term_data)) {
+    stop("word_frequency or count column not found in data")
+  }
+
+  if ("count" %in% names(term_data) && !"word_frequency" %in% names(term_data)) {
+    term_data$word_frequency <- term_data$count
+  }
+
+  if (!is.null(terms)) {
+    term_data <- term_data %>%
+      dplyr::filter(term %in% terms) %>%
+      dplyr::mutate(term = factor(term, levels = terms))
+  }
+
+  if (is.null(title)) {
+    title <- paste("Term Frequency by", continuous_var)
+  }
+
+  term_data$hover_text <- paste("Term:", term_data$term,
+                               paste0("<br>", continuous_var, ":"), term_data[[continuous_var]],
+                               "<br>Frequency:", term_data$word_frequency)
+
+  ggplot2::ggplot(
+    term_data,
+    ggplot2::aes(
+      x = .data[[continuous_var]],
+      y = word_frequency,
+      group = term,
+      text = hover_text
+    )
+  ) +
+    ggplot2::geom_point(color = "#337ab7", alpha = 0.6, size = 2.5) +
+    ggplot2::geom_line(color = "#337ab7", alpha = 0.6, linewidth = 0.5) +
+    ggplot2::facet_wrap(~term, scales = "free") +
+    ggplot2::scale_y_continuous(labels = scales::number_format(accuracy = 1)) +
+    ggplot2::labs(y = "Word Frequency", x = continuous_var, title = title) +
+    ggplot2::theme_minimal(base_size = 11) +
+    ggplot2::theme(
+      legend.position = "none",
+      plot.title = ggplot2::element_text(size = 13, color = "#0c1f4a"),
+      axis.line = ggplot2::element_line(color = "#3B3B3B", linewidth = 0.3),
+      axis.ticks = ggplot2::element_line(color = "#3B3B3B", linewidth = 0.3),
+      strip.text.x = ggplot2::element_text(size = 11, color = "#0c1f4a"),
+      axis.text = ggplot2::element_text(size = 11, color = "#3B3B3B"),
+      axis.title = ggplot2::element_text(size = 12, color = "#0c1f4a"),
+      axis.title.x = ggplot2::element_text(margin = ggplot2::margin(t = 15)),
+      axis.title.y = ggplot2::element_text(margin = ggplot2::margin(r = 15)),
+      plot.margin = ggplot2::margin(t = 5, r = 10, b = 25, l = 15)
+    )
+}
+
+
+
+#' Plot Part-of-Speech Tag Frequencies
+#'
+#' @description
+#' Creates a bar plot showing the frequency distribution of part-of-speech tags.
+#'
+#' @param pos_data Data frame containing POS data with columns:
+#'   \itemize{
+#'     \item \code{pos}: Part-of-speech tag
+#'     \item \code{n}: (optional) Pre-computed frequency count
+#'   }
+#'   If \code{n} is not present, frequencies will be computed from the data.
+#' @param top_n Number of top POS tags to display (default: 20)
+#' @param title Plot title (default: "Part-of-Speech Tag Frequency")
+#' @param color Bar color (default: "#337ab7")
+#' @param height Plot height in pixels (default: 500)
+#' @param width Plot width in pixels (default: NULL for auto)
+#'
+#' @return A plotly object
+#'
+#' @concept visualization
+#' @export
+#'
+#' @examples
+#' if (interactive()) {
+#'   pos_df <- data.frame(
+#'     pos = c("NOUN", "VERB", "ADJ", "ADV", "PRON"),
+#'     n = c(500, 400, 250, 150, 100)
+#'   )
+#'   plot_pos_frequencies(pos_df)
+#' }
+plot_pos_frequencies <- function(pos_data,
+                                  top_n = 20,
+                                  title = "Part-of-Speech Tag Frequency",
+                                  color = "#337ab7",
+                                  height = 500,
+                                  width = NULL) {
+
+  if (is.null(pos_data) || nrow(pos_data) == 0) {
+    return(
+      ggplot2::ggplot() +
+        ggplot2::annotate("text", x = 0.5, y = 0.5,
+                          label = "No POS data available",
+                          size = 5, color = "#ef4444") +
+        ggplot2::theme_void()
+    )
+  }
+
+  if (!"n" %in% names(pos_data)) {
+    pos_freq <- pos_data %>%
+      dplyr::count(pos, sort = TRUE) %>%
+      dplyr::slice_head(n = top_n)
+  } else {
+    pos_freq <- pos_data %>%
+      dplyr::arrange(dplyr::desc(n)) %>%
+      dplyr::slice_head(n = top_n)
+  }
+
+  pos_freq$pos_ordered <- stats::reorder(pos_freq$pos, pos_freq$n)
+
+  ggplot2::ggplot(pos_freq, ggplot2::aes(x = pos_ordered, y = n,
+                                          text = paste0(pos, "\nFrequency: ", n))) +
+    ggplot2::geom_col(fill = color) +
+    ggplot2::labs(x = "POS Tag", y = "Frequency", title = title) +
+    ggplot2::theme_minimal(base_size = 11) +
+    ggplot2::theme(
+      plot.title = ggplot2::element_text(size = 13, color = "#0c1f4a"),
+      axis.text = ggplot2::element_text(size = 11, color = "#3B3B3B"),
+      axis.title = ggplot2::element_text(size = 12, color = "#0c1f4a")
+    )
+}
+
+
+#' Plot Named Entity Frequencies
+#'
+#' @description
+#' Creates a bar plot showing the frequency distribution of named entity types.
+#'
+#' @param entity_data Data frame containing entity data with columns:
+#'   \itemize{
+#'     \item \code{entity}: Named entity type (e.g., "PERSON", "ORG", "GPE")
+#'     \item \code{n}: (optional) Pre-computed frequency count
+#'   }
+#'   If \code{n} is not present, frequencies will be computed from the data.
+#' @param top_n Number of top entity types to display (default: 20)
+#' @param title Plot title (default: "Named Entity Type Frequency")
+#' @param color Bar color (default: "#10B981")
+#' @param height Plot height in pixels (default: 500)
+#' @param width Plot width in pixels (default: NULL for auto)
+#' @param custom_colors Named vector of custom entity type colors (e.g.,
+#'   c(CONCEPT = "#00acc1", THEME = "#7c4dff")). Custom colors override defaults.
+#'
+#' @return A plotly object
+#'
+#' @concept visualization
+#' @export
+#'
+#' @examples
+#' if (interactive()) {
+#'   entity_df <- data.frame(
+#'     entity = c("PERSON", "ORG", "GPE", "DATE", "MONEY"),
+#'     n = c(300, 250, 200, 150, 100)
+#'   )
+#'   plot_entity_frequencies(entity_df)
+#'
+#'   # With custom colors
+#'   plot_entity_frequencies(entity_df, custom_colors = c(PERSON = "#ff0000"))
+#' }
+plot_entity_frequencies <- function(entity_data,
+                                     top_n = 20,
+                                     title = "Named Entity Type Frequency",
+                                     color = NULL,
+                                     height = 500,
+                                     width = NULL,
+                                     custom_colors = NULL) {
+
+  if (!requireNamespace("plotly", quietly = TRUE)) {
+    stop("Package 'plotly' is required. Please install it.")
+  }
+
+  if (is.null(entity_data) || nrow(entity_data) == 0) {
+    return(plotly::plot_ly(type = "scatter", mode = "markers") %>%
+      plotly::layout(
+        xaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE),
+        yaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE),
+        annotations = list(
+          list(
+            text = "No named entities found",
+            x = 0.5, y = 0.5,
+            xref = "paper", yref = "paper",
+            showarrow = FALSE,
+            font = list(size = 16, color = "#6B7280", family = "Roboto")
+          )
+        )
+      ))
+  }
+
+  if (!"n" %in% names(entity_data)) {
+    entity_freq <- entity_data %>%
+      dplyr::count(entity, sort = TRUE) %>%
+      dplyr::slice_head(n = top_n)
+  } else {
+    entity_freq <- entity_data %>%
+      dplyr::arrange(dplyr::desc(n)) %>%
+      dplyr::slice_head(n = top_n)
+  }
+
+  entity_colors <- c(
+    "PERSON" = "#e91e63", "ORG" = "#2196f3", "GPE" = "#4caf50",
+    "DATE" = "#ff9800", "MONEY" = "#9c27b0", "CARDINAL" = "#607d8b",
+    "ORDINAL" = "#795548", "PERCENT" = "#00bcd4", "PRODUCT" = "#3f51b5",
+    "EVENT" = "#f44336", "WORK_OF_ART" = "#673ab7", "LAW" = "#009688",
+    "LANGUAGE" = "#8bc34a", "LOC" = "#03a9f4", "FAC" = "#cddc39",
+    "NORP" = "#ffc107", "TIME" = "#ff5722", "QUANTITY" = "#9e9e9e",
+    "DISABILITY" = "#E91E63", "PROGRAM" = "#2196F3", "TEST" = "#4CAF50",
+    "CONCEPT" = "#00acc1", "TOOL" = "#FF9800", "METHOD" = "#00BCD4",
+    "THEME" = "#7c4dff", "CODE" = "#546e7a", "CATEGORY" = "#26a69a",
+    "CUSTOM" = "#d81b60"
+  )
+
+  if (!is.null(custom_colors) && length(custom_colors) > 0) {
+    entity_colors[names(custom_colors)] <- custom_colors
+  }
+
+  bar_colors <- vapply(entity_freq$entity, function(e) {
+    if (e %in% names(entity_colors)) entity_colors[[e]] else "#757575"
+  }, character(1))
+
+  plotly::plot_ly(
+    data = entity_freq,
+    x = ~stats::reorder(entity, n),
+    y = ~n,
+    type = "bar",
+    marker = list(color = bar_colors),
+    hoverinfo = "text",
+    hovertext = ~paste0(entity, "\nFrequency: ", n),
+    height = height,
+    width = width
+  ) %>%
+    plotly::layout(
+      title = list(
+        text = title,
+        font = list(size = 18, color = "#0c1f4a", family = "Roboto, sans-serif")
+      ),
+      xaxis = list(
+        title = "",
+        tickangle = -45,
+        tickfont = list(size = 16, color = "#3B3B3B", family = "Roboto, sans-serif")
+      ),
+      yaxis = list(
+        title = "Frequency",
+        titlefont = list(size = 16, color = "#0c1f4a", family = "Roboto, sans-serif"),
+        tickfont = list(size = 16, color = "#3B3B3B", family = "Roboto, sans-serif")
+      ),
+      margin = list(b = 150, l = 60, r = 20, t = 60),
+      hoverlabel = list(
+        align = "left",
+        font = list(size = 16, color = "white", family = "Roboto, sans-serif"),
+        bgcolor = "#0c1f4a"
+      )
+    )
+}
+
+
+#' Render displaCy Entity Visualization
+#'
+#' @description
+#' Renders spaCy's displaCy entity visualization as HTML.
+#' Highlights named entities with colored labels.
+#'
+#' @param text Character string to visualize.
+#' @param model spaCy model name (default: "en_core_web_sm").
+#' @param colors Named list of entity type to color mappings (e.g.,
+#'   list(PERSON = "#e91e63", ORG = "#2196f3")). If NULL, uses spaCy defaults.
+#'
+#' @return HTML string with entity highlighting.
+#'
+#' @concept lexical
+#' @export
+render_displacy_ent <- function(text, model = "en_core_web_sm", colors = NULL) {
+  if (!requireNamespace("reticulate", quietly = TRUE)) {
+    return(.notify_missing_python("displaCy entity visualization"))
+  }
+
+  tryCatch({
+    spacy <- reticulate::import("spacy")
+    displacy_module <- reticulate::import("spacy.displacy")
+
+    nlp <- spacy$load(model)
+    doc <- nlp(text)
+
+    if (length(doc$ents) == 0) {
+      return("<div>No named entities detected in this text.</div>")
+    }
+
+    options <- list()
+    if (!is.null(colors) && length(colors) > 0) {
+      options$colors <- colors
+    }
+
+    if (length(options) > 0) {
+      html <- displacy_module$render(doc, style = "ent", page = FALSE, options = options)
+    } else {
+      html <- displacy_module$render(doc, style = "ent", page = FALSE)
+    }
+
+    return(as.character(html))
+  }, error = function(e) {
+    stop("displaCy rendering failed: ", e$message)
+  })
+}
+
+
+#' Render displaCy Dependency Visualization
+#'
+#' @description
+#' Renders spaCy's displaCy dependency visualization as SVG.
+#' Shows syntactic structure with arrows between words.
+#'
+#' @param text Character string to visualize.
+#' @param compact Logical; use compact mode for space (default: TRUE).
+#' @param model spaCy model name (default: "en_core_web_sm").
+#'
+#' @return SVG string with dependency tree.
+#'
+#' @concept lexical
+#' @export
+render_displacy_dep <- function(text, compact = TRUE, model = "en_core_web_sm") {
+  if (!requireNamespace("reticulate", quietly = TRUE)) {
+    return(.notify_missing_python("displaCy dependency visualization"))
+  }
+
+  tryCatch({
+    spacy <- reticulate::import("spacy")
+    displacy_module <- reticulate::import("spacy.displacy")
+
+    nlp <- spacy$load(model)
+    doc <- nlp(text)
+
+    options <- list(compact = compact)
+
+    svg <- displacy_module$render(doc, style = "dep", options = options, page = FALSE)
+
+    return(as.character(svg))
+  }, error = function(e) {
+    stop("displaCy rendering failed: ", e$message)
+  })
+}
+
+
+# =============================================================================
+# spaCy NLP Interface Functions
+# =============================================================================
+# R wrapper functions for spaCy NLP via reticulate.
+# Provides direct Python spaCy access for full control
+# over all spaCy features including morphology.
+
+# Package-level spaCy instance
+.spacy_env <- new.env(parent = emptyenv())
+
+.spacy_prepare_texts <- function(x) {
+  if (inherits(x, "tokens")) {
+    texts <- vapply(as.list(x), function(toks) paste(toks, collapse = " "), character(1))
+    doc_names <- quanteda::docnames(x)
+  } else if (is.character(x)) {
+    texts <- x
+    doc_names <- names(x) %||% paste0("text", seq_along(texts))
+  } else {
+    stop("x must be a character vector or quanteda tokens object")
+  }
+  list(texts_list = as.list(unname(texts)), doc_names = doc_names)
+}
+
+.map_spacy_doc_ids <- function(df, doc_names) {
+  if (nrow(df) > 0 && "doc_id" %in% names(df) && length(doc_names) > 0) {
+    df$doc_id <- as.character(df$doc_id)
+    doc_id_map <- stats::setNames(doc_names, paste0("text", seq_along(doc_names)))
+    matched <- doc_id_map[df$doc_id]
+    df$doc_id <- ifelse(is.na(matched), df$doc_id, matched)
+  }
+  df
+}
+
+#' Initialize spaCy NLP
+#'
+#' @description
+#' Initialize the spaCy NLP pipeline with the specified model.
+#' Uses a cached instance for efficiency.
+#'
+#' @param model Character; spaCy model name (default: "en_core_web_sm").
+#' @param force Logical; force reinitialization even if already initialized.
+#'
+#' @return Invisibly returns the SpacyNLP Python object.
+#'
+#' @details
+#' Available models:
+#' \itemize{
+#'   \item \code{en_core_web_sm}: Small English model (fast, no word vectors)
+#'   \item \code{en_core_web_md}: Medium English model (word vectors)
+#'   \item \code{en_core_web_lg}: Large English model (best accuracy)
+#' }
+#'
+#' @concept lexical
+#' @keywords internal
+#' @export
+#'
+#' @examples
+#' if (interactive()) {
+#' init_spacy_nlp("en_core_web_sm")
+#' }
+init_spacy_nlp <- function(model = "en_core_web_sm", force = FALSE) {
+  if (!requireNamespace("reticulate", quietly = TRUE)) {
+    return(.notify_missing_python("spaCy initialization"))
+  }
+
+  # Check if already initialized with same model
+  if (!force && !is.null(.spacy_env$nlp) && isTRUE(.spacy_env$model == model)) {
+    return(invisible(.spacy_env$nlp))
+  }
+
+  # Import the Python module
+  python_path <- system.file("python", package = "TextAnalysisR")
+  if (python_path == "") {
+    stop("Cannot find Python module directory in TextAnalysisR package")
+  }
+
+  tryCatch({
+    spacy_module <- reticulate::import_from_path("spacy_nlp", path = python_path)
+    nlp <- spacy_module$SpacyNLP(model)
+    .spacy_env$nlp <- nlp
+    .spacy_env$model <- model
+    .spacy_env$module <- spacy_module
+    message("spaCy initialized with model: ", model)
+    invisible(nlp)
+  }, error = function(e) {
+    stop("Failed to initialize spaCy: ", e$message,
+         "\nMake sure spaCy is installed: pip install spacy",
+         "\nAnd download the model: python -m spacy download ", model)
+  })
+}
+
+#' Check if spaCy is Initialized
+#'
+#' @description
+#' Check whether spaCy has been initialized.
+#'
+#' @return Logical; TRUE if initialized, FALSE otherwise.
+#'
+#' @concept lexical
+#' @export
+spacy_initialized <- function() {
+  !is.null(.spacy_env$nlp)
+}
+
+#' Check if Model Has Word Vectors
+#'
+#' @description
+#' Check if the loaded spaCy model has word vectors for similarity calculations.
+#'
+#' @return Logical; TRUE if model has vectors, FALSE otherwise.
+#'
+#' @concept lexical
+#' @export
+spacy_has_vectors <- function() {
+  if (!spacy_initialized()) {
+    stop("spaCy not initialized. Call init_spacy_nlp() first.")
+  }
+  .spacy_env$nlp$has_vectors()
+}
+
+#' Get spaCy Model Information
+#'
+#' @description
+#' Get information about the currently loaded spaCy model.
+#'
+#' @return A list with model information including name, language,
+#'   pipeline components, and vector availability.
+#'
+#' @concept lexical
+#' @export
+get_spacy_model_info <- function() {
+  if (!spacy_initialized()) {
+    stop("spaCy not initialized. Call init_spacy_nlp() first.")
+  }
+  info <- .spacy_env$nlp$get_model_info()
+  as.list(info)
+}
+
+#' Parse Texts with spaCy
+#'
+#' @description
+#' Parse texts using spaCy and return token-level annotations.
+#' This is the main parsing function for NLP analysis.
+#' Works with character vectors or quanteda tokens objects.
+#'
+#' @param x Character vector of texts OR a quanteda tokens object.
+#' @param pos Logical; include coarse POS tags (default: TRUE).
+#' @param tag Logical; include fine-grained tags (default: TRUE).
+#' @param lemma Logical; include lemmatized forms (default: TRUE).
+#' @param entity Logical; include named entity tags (default: FALSE).
+#' @param dependency Logical; include dependency relations (default: FALSE).
+#' @param morph Logical; include morphological features (default: FALSE).
+#' @param model Character; spaCy model to use (default: "en_core_web_sm").
+#'
+#' @return A data frame with token-level annotations including:
+#' \itemize{
+#'   \item \code{doc_id}: Document identifier
+#'   \item \code{sentence_id}: Sentence number within document
+#'   \item \code{token_id}: Token position within sentence
+#'   \item \code{token}: Original token text
+#'   \item \code{pos}: Coarse POS tag (if pos = TRUE)
+#'   \item \code{tag}: Fine-grained tag (if tag = TRUE)
+#'   \item \code{lemma}: Lemmatized form (if lemma = TRUE)
+#'   \item \code{entity}: Named entity tag (if entity = TRUE)
+#'   \item \code{head_token_id}: Head token ID (if dependency = TRUE)
+#'   \item \code{dep_rel}: Dependency relation (if dependency = TRUE)
+#'   \item \code{morph}: Morphological features string (if morph = TRUE)
+#' }
+#'
+#' @concept lexical
+#' @export
+#'
+#' @examples
+#' if (interactive()) {
+#' # From SpecialEduTech dataset
+#' texts <- TextAnalysisR::SpecialEduTech$abstract[1:5]
+#' parsed <- spacy_parse_full(texts, morph = TRUE)
+#'
+#' # From quanteda tokens
+#' united <- unite_cols(TextAnalysisR::SpecialEduTech, c("title", "abstract"))
+#' tokens <- prep_texts(united, text_field = "united_texts")
+#' parsed <- spacy_parse_full(tokens, morph = TRUE)
+#' }
+spacy_parse_full <- function(x,
+                             pos = TRUE,
+                             tag = TRUE,
+                             lemma = TRUE,
+                             entity = FALSE,
+                             dependency = FALSE,
+                             morph = FALSE,
+                             model = "en_core_web_sm") {
+  if (!requireNamespace("reticulate", quietly = TRUE)) {
+    return(.notify_missing_python("spaCy-backed features"))
+  }
+
+
+  if (!spacy_initialized() || !isTRUE(.spacy_env$model == model)) {
+    init_spacy_nlp(model)
+  }
+
+  prepared <- .spacy_prepare_texts(x)
+
+  result <- .spacy_env$nlp$parse_to_dataframe(
+    prepared$texts_list,
+    include_pos = pos,
+    include_tag = tag,
+    include_lemma = lemma,
+    include_entity = entity,
+    include_dependency = dependency,
+    include_morph = morph
+  )
+
+  df <- as.data.frame(reticulate::py_to_r(result))
+  .map_spacy_doc_ids(df, prepared$doc_names)
+}
+
+#' Lemmatize Texts with spaCy
+#'
+#' @description
+#' Perform lemmatization using spaCy with optimized pipeline settings.
+#' Disables unnecessary components (NER, parser) for faster processing.
+#'
+#' @param x Character vector of texts OR a quanteda tokens object.
+#' @param batch_size Integer; batch size for processing (default: 100).
+#' @param model Character; spaCy model to use (default: "en_core_web_sm").
+#'
+#' @return A data frame with columns: doc_id, token_id, token, lemma.
+#'
+#' @details
+#' This function disables NER, entity_ruler, and parser components to speed up
+#' lemmatization. Use this for lemmas without other annotations.
+#'
+#' @concept lexical
+#' @export
+spacy_lemmatize <- function(x, batch_size = 100, model = "en_core_web_sm") {
+  if (!requireNamespace("reticulate", quietly = TRUE)) {
+    return(.notify_missing_python("spaCy-backed features"))
+  }
+
+  if (!spacy_initialized() || !isTRUE(.spacy_env$model == model)) {
+    init_spacy_nlp(model)
+  }
+
+  prepared <- .spacy_prepare_texts(x)
+
+  result <- .spacy_env$nlp$lemmatize(
+    prepared$texts_list,
+    batch_size = as.integer(batch_size)
+  )
+
+  df <- as.data.frame(reticulate::py_to_r(result))
+  .map_spacy_doc_ids(df, prepared$doc_names)
+}
+
+#' Extract Named Entities with spaCy
+#'
+#' @description
+#' Extract named entities from texts using spaCy NER.
+#'
+#' @param x Character vector of texts OR a quanteda tokens object.
+#' @param model Character; spaCy model to use (default: "en_core_web_sm").
+#'
+#' @return A data frame with entity information:
+#' \itemize{
+#'   \item \code{doc_id}: Document identifier
+#'   \item \code{text}: Entity text
+#'   \item \code{label}: Entity type (PERSON, ORG, GPE, etc.)
+#'   \item \code{start_char}: Start character position
+#'   \item \code{end_char}: End character position
+#' }
+#'
+#' @concept lexical
+#' @export
+spacy_extract_entities <- function(x, model = "en_core_web_sm") {
+  if (!requireNamespace("reticulate", quietly = TRUE)) {
+    return(.notify_missing_python("spaCy-backed features"))
+  }
+
+  if (!spacy_initialized() || !isTRUE(.spacy_env$model == model)) {
+    init_spacy_nlp(model)
+  }
+
+  prepared <- .spacy_prepare_texts(x)
+  result <- .spacy_env$nlp$get_entities(prepared$texts_list)
+  df <- as.data.frame(reticulate::py_to_r(result))
+  .map_spacy_doc_ids(df, prepared$doc_names)
+}
+
+#' Extract Noun Chunks
+#'
+#' @description
+#' Extract noun chunks (base noun phrases) from texts.
+#' Useful for keyphrase extraction.
+#'
+#' @param x Character vector of texts OR a quanteda tokens object.
+#' @param model Character; spaCy model to use (default: "en_core_web_sm").
+#'
+#' @return A data frame with noun chunk information.
+#'
+#' @concept lexical
+#' @export
+extract_noun_chunks <- function(x, model = "en_core_web_sm") {
+  if (!requireNamespace("reticulate", quietly = TRUE)) {
+    return(.notify_missing_python("spaCy-backed features"))
+  }
+
+  if (!spacy_initialized() || !isTRUE(.spacy_env$model == model)) {
+    init_spacy_nlp(model)
+  }
+
+  prepared <- .spacy_prepare_texts(x)
+  result <- .spacy_env$nlp$get_noun_chunks(prepared$texts_list)
+  df <- as.data.frame(reticulate::py_to_r(result))
+  .map_spacy_doc_ids(df, prepared$doc_names)
+}
+
+#' Extract Subjects and Objects
+#'
+#' @description
+#' Extract subject-verb-object (SVO) triples from texts using dependency parsing.
+#'
+#' @param x Character vector of texts OR a quanteda tokens object.
+#' @param model Character; spaCy model to use (default: "en_core_web_sm").
+#'
+#' @return A data frame with SVO information.
+#'
+#' @concept lexical
+#' @export
+extract_subjects_objects <- function(x, model = "en_core_web_sm") {
+  if (!requireNamespace("reticulate", quietly = TRUE)) {
+    return(.notify_missing_python("spaCy-backed features"))
+  }
+
+  if (!spacy_initialized() || !isTRUE(.spacy_env$model == model)) {
+    init_spacy_nlp(model)
+  }
+
+  prepared <- .spacy_prepare_texts(x)
+  result <- .spacy_env$nlp$get_subjects_objects(prepared$texts_list)
+  df <- as.data.frame(reticulate::py_to_r(result))
+  .map_spacy_doc_ids(df, prepared$doc_names)
+}
+
+#' Get Sentences
+#'
+#' @description
+#' Segment texts into sentences using spaCy's sentence boundary detection.
+#'
+#' @param x Character vector of texts OR a quanteda tokens object.
+#' @param model Character; spaCy model to use (default: "en_core_web_sm").
+#'
+#' @return A data frame with sentence information.
+#'
+#' @concept lexical
+#' @export
+get_sentences <- function(x, model = "en_core_web_sm") {
+  if (!requireNamespace("reticulate", quietly = TRUE)) {
+    return(.notify_missing_python("spaCy-backed features"))
+  }
+
+  if (!spacy_initialized() || !isTRUE(.spacy_env$model == model)) {
+    init_spacy_nlp(model)
+  }
+
+  prepared <- .spacy_prepare_texts(x)
+  result <- .spacy_env$nlp$get_sentences(prepared$texts_list)
+  df <- as.data.frame(reticulate::py_to_r(result))
+  .map_spacy_doc_ids(df, prepared$doc_names)
+}
+
+#' Calculate Word Similarity
+#'
+#' @description
+#' Calculate semantic similarity between two words using word vectors.
+#' Requires a spaCy model with word vectors (en_core_web_md or en_core_web_lg).
+#'
+#' @param word1 Character; first word.
+#' @param word2 Character; second word.
+#' @param model Character; spaCy model to use (default: "en_core_web_md").
+#'
+#' @return A list with similarity score and metadata.
+#'
+#' @concept lexical
+#' @export
+get_word_similarity <- function(word1, word2, model = "en_core_web_md") {
+  if (!spacy_initialized() || !isTRUE(.spacy_env$model == model)) {
+    init_spacy_nlp(model)
+  }
+
+  result <- .spacy_env$nlp$get_word_similarity(word1, word2)
+  as.list(result)
+}
+
+#' Find Similar Words
+#'
+#' @description
+#' Find words most similar to a given word using word vectors.
+#' Requires a spaCy model with word vectors (en_core_web_md or en_core_web_lg).
+#'
+#' @param word Character; target word.
+#' @param top_n Integer; number of similar words to return (default: 10).
+#' @param model Character; spaCy model to use (default: "en_core_web_md").
+#'
+#' @return A data frame with similar words and similarity scores.
+#'
+#' @concept lexical
+#' @export
+find_similar_words <- function(word, top_n = 10L, model = "en_core_web_md") {
+  if (!requireNamespace("reticulate", quietly = TRUE)) {
+    return(.notify_missing_python("spaCy-backed features"))
+  }
+
+  if (!spacy_initialized() || !isTRUE(.spacy_env$model == model)) {
+    init_spacy_nlp(model)
+  }
+
+  result <- .spacy_env$nlp$find_similar_words(word, as.integer(top_n))
+  df <- reticulate::py_to_r(result)
+
+  return(df)
+}
+
+#' Get spaCy Word Embeddings
+#'
+#' @description
+#' Get word vector embeddings for words or texts using spaCy.
+#' Requires a spaCy model with word vectors.
+#'
+#' @param texts Character vector of words or texts.
+#' @param model Character; spaCy model to use (default: "en_core_web_md").
+#'
+#' @return A matrix of word embeddings (rows = texts, cols = dimensions).
+#'
+#' @concept lexical
+#' @keywords internal
+get_spacy_embeddings <- function(texts, model = "en_core_web_md") {
+  if (!spacy_initialized() || !isTRUE(.spacy_env$model == model)) {
+    init_spacy_nlp(model)
+  }
+
+  if (!spacy_has_vectors()) {
+    stop("Model '", model, "' has no word vectors. Use en_core_web_md or en_core_web_lg.")
+  }
+
+  # Get vectors via Python - access the underlying nlp object
+  nlp <- .spacy_env$nlp$nlp
+
+  vectors <- lapply(texts, function(text) {
+    doc <- nlp(text)
+    as.numeric(doc$vector)
+  })
+
+  # Convert to matrix
+  mat <- do.call(rbind, vectors)
+  rownames(mat) <- texts
+
+  return(mat)
+}
+
+#' Parse Morphology String
+#'
+#' @description
+#' Parse spaCy's morphology string format into individual columns.
+#' Used internally by morphology analysis functions.
+#' Always extracts all common morphology features (Number, Tense, VerbForm,
+#' Person, Case, Mood, Aspect) regardless of the features parameter.
+#'
+#' @param data Data frame with a 'morph' column from spaCy parsing.
+#' @param features Character vector of feature names (ignored, kept for
+#'   backwards compatibility). All features are always extracted.
+#'
+#' @return Data frame with additional morph_* columns for each feature.
+#'
+#' @concept lexical
+#' @keywords internal
+parse_morphology_string <- function(data, features = NULL) {
+  # Always extract all common morphology features
+  all_features <- c("Number", "Tense", "VerbForm", "Person", "Case", "Mood", "Aspect")
+
+  for (feat in all_features) {
+    col_name <- paste0("morph_", feat)
+    data[[col_name]] <- vapply(data$morph, function(m) {
+      if (is.null(m) || length(m) == 0 || !is.atomic(m)) return(NA_character_)
+      m_str <- as.character(m)[1]
+      if (is.na(m_str) || m_str == "") return(NA_character_)
+      parts <- strsplit(m_str, "\\|")[[1]]
+      for (part in parts) {
+        kv <- strsplit(part, "=")[[1]]
+        if (length(kv) == 2 && kv[1] == feat) {
+          return(kv[2])
+        }
+      }
+      return(NA_character_)
+    }, FUN.VALUE = character(1), USE.NAMES = FALSE)
+  }
+  return(data)
+}
+
+
+# Log odds ratio analysis
+
+#' Calculate Log Odds Ratio Between Categories
+#'
+#' @description
+#' Compares word usage between categories using the log-odds ratio with a
+#' uniform Dirichlet prior, ranked by z-score. Identifies words distinctively
+#' used in one category. For the informative-prior weighted log-odds, see
+#' [calculate_weighted_log_odds()].
+#'
+#' @param dfm_object A quanteda dfm object
+#' @param group_var Character, name of the grouping variable in docvars
+#' @param comparison_mode Character, one of "binary", "one_vs_rest", or "pairwise"
+#'   \itemize{
+#'     \item binary: Compare two categories directly
+#'     \item one_vs_rest: Compare each category against all others combined
+#'     \item pairwise: Compare all pairs of categories
+#'   }
+#' @param reference_level Character, reference category for binary comparison (default: first level)
+#' @param top_n Number of top terms per comparison (default: 10)
+#' @param min_count Minimum word count to include (default: 5)
+#'
+#' @return Data frame with columns:
+#'   \itemize{
+#'     \item term: The word/feature
+#'     \item category1: First category in comparison
+#'     \item category2: Second category in comparison
+#'     \item count1: Count in category 1
+#'     \item count2: Count in category 2
+#'     \item odds1: Smoothed odds in category 1, (count + 1) / (total + V - count - 1)
+#'     \item odds2: Smoothed odds in category 2
+#'     \item odds_ratio: Ratio of odds
+#'     \item log_odds_ratio: Log of odds ratio (positive = more in compared category)
+#'     \item variance: Approximate variance of the log odds ratio
+#'     \item z_score: Log odds ratio divided by its standard error
+#'     \item significant: TRUE when |z| >= 1.96
+#'   }
+#'   Terms are ranked by absolute z-score.
+#'
+#' @concept lexical
+#' @export
+#'
+#' @examples
+#' \donttest{
+#' articles <- TextAnalysisR::SpecialEduTech[1:20, ]
+#' corpus <- quanteda::corpus(
+#'   articles$abstract,
+#'   docvars = data.frame(reference_type = articles$reference_type)
+#' )
+#' dfm_object <- quanteda::dfm(quanteda::tokens(corpus))
+#' log_odds <- calculate_log_odds_ratio(dfm_object, "reference_type")
+#' }
+calculate_log_odds_ratio <- function(dfm_object,
+                                      group_var,
+                                      comparison_mode = c("binary", "one_vs_rest", "pairwise"),
+                                      reference_level = NULL,
+                                      top_n = 10,
+                                      min_count = 5) {
+
+  comparison_mode <- match.arg(comparison_mode)
+
+  if (!inherits(dfm_object, "dfm")) {
+    stop("dfm_object must be a quanteda dfm object")
+  }
+
+  if (!group_var %in% names(quanteda::docvars(dfm_object))) {
+    stop("group_var '", group_var, "' not found in document variables")
+  }
+
+  groups <- quanteda::docvars(dfm_object)[[group_var]]
+  levels <- unique(groups[!is.na(groups)])
+
+  if (length(levels) < 2) {
+    stop(
+      "Need at least 2 categories for comparison in '", group_var, "'. ",
+      "Found only: ", paste(levels, collapse = ", "),
+      call. = FALSE
+    )
+  }
+
+  # Helper function for pairwise comparison
+  compare_two <- function(dfm_obj, level1, level2, groups) {
+    idx1 <- which(groups == level1)
+    idx2 <- which(groups == level2)
+
+    if (length(idx1) == 0 || length(idx2) == 0) {
+      return(NULL)
+    }
+
+    # Sum counts per group
+    counts1 <- Matrix::colSums(dfm_obj[idx1, , drop = FALSE])
+    counts2 <- Matrix::colSums(dfm_obj[idx2, , drop = FALSE])
+
+    # Totals from the full vocabulary, before any filtering
+    n1 <- sum(counts1)
+    n2 <- sum(counts2)
+    vocab_size <- length(counts1)
+
+    # min_count filters which terms are reported, not the totals
+    keep <- (counts1 + counts2) >= min_count
+    counts1 <- counts1[keep]
+    counts2 <- counts2[keep]
+
+    if (length(counts1) == 0) {
+      return(NULL)
+    }
+
+    # smoothed odds with uniform Dirichlet prior (a_w = 1, a_0 = V)
+    odds1 <- (counts1 + 1) / (n1 + vocab_size - counts1 - 1)
+    odds2 <- (counts2 + 1) / (n2 + vocab_size - counts2 - 1)
+
+    odds_ratio <- odds1 / odds2
+    log_odds <- log(odds_ratio)
+
+    variance <- 1 / (counts1 + 1) + 1 / (n1 + vocab_size - counts1 - 1) +
+      1 / (counts2 + 1) + 1 / (n2 + vocab_size - counts2 - 1)
+    z_score <- log_odds / sqrt(variance)
+
+    result <- data.frame(
+      term = names(counts1),
+      category1 = level1,
+      category2 = level2,
+      count1 = as.numeric(counts1),
+      count2 = as.numeric(counts2),
+      odds1 = odds1,
+      odds2 = odds2,
+      odds_ratio = odds_ratio,
+      log_odds_ratio = log_odds,
+      variance = as.numeric(variance),
+      z_score = z_score,
+      significant = abs(z_score) >= 1.96,
+      stringsAsFactors = FALSE
+    )
+
+    result <- result[order(abs(result$z_score), decreasing = TRUE), ]
+    utils::head(result, top_n)
+  }
+
+  results <- list()
+
+
+  if (comparison_mode == "binary") {
+    if (length(levels) != 2 && is.null(reference_level)) {
+      message("More than 2 categories. Using first two: ", levels[1], " vs ", levels[2])
+    }
+
+    if (is.null(reference_level)) {
+      # Default: second level compared to first (first as reference)
+      level1 <- levels[2]  # Compared (numerator)
+      level2 <- levels[1]  # Reference (denominator)
+    } else {
+      # User-specified reference: compare the other level to reference
+      level1 <- setdiff(levels, reference_level)[1]  # Compared (numerator)
+      level2 <- reference_level  # Reference (denominator)
+    }
+
+    results[[1]] <- compare_two(dfm_object, level1, level2, groups)
+
+  } else if (comparison_mode == "one_vs_rest") {
+    for (level in levels) {
+      # Combine all other categories
+      groups_binary <- ifelse(groups == level, level, "Other")
+      result <- compare_two(dfm_object, level, "Other", groups_binary)
+      if (!is.null(result)) {
+        results[[length(results) + 1]] <- result
+      }
+    }
+
+  } else if (comparison_mode == "pairwise") {
+    pairs <- utils::combn(levels, 2, simplify = FALSE)
+    for (pair in pairs) {
+      result <- compare_two(dfm_object, pair[1], pair[2], groups)
+      if (!is.null(result)) {
+        results[[length(results) + 1]] <- result
+      }
+    }
+  }
+
+  if (length(results) == 0) {
+    return(data.frame(
+      term = character(),
+      category1 = character(),
+      category2 = character(),
+      count1 = numeric(),
+      count2 = numeric(),
+      odds1 = numeric(),
+      odds2 = numeric(),
+      odds_ratio = numeric(),
+      log_odds_ratio = numeric(),
+      variance = numeric(),
+      z_score = numeric()
+    ))
+  }
+
+  do.call(rbind, results)
+}
+
+
+#' Calculate Weighted Log Odds Ratio
+#'
+#' @description
+#' Computes weighted log odds ratios using the method from Monroe, Colaresi,
+#' and Quinn (2008) "Fightin' Words" via the tidylo package. This method
+#' weights log odds by variance (z-score) to identify words that reliably
+#' distinguish between groups, accounting for sampling variability.
+#'
+#' @param dfm_object A quanteda dfm object
+#' @param group_var Character, name of the document variable to group by
+#' @param top_n Number of top terms to return per group (default: 10)
+#' @param min_count Minimum total count for a term to be included (default: 5)
+#'
+#' @return A data frame with the grouping variable, feature, n,
+#'   log_odds_weighted (from tidylo::bind_log_odds), and significant
+#'   (TRUE when |log_odds_weighted| >= 1.96)
+#'
+#' @references
+#' Monroe, B. L., Colaresi, M. P., & Quinn, K. M. (2008). Fightin' words:
+#' Lexical feature selection and evaluation for identifying the content of
+#' political conflict. Political Analysis, 16(4), 372-403.
+#'
+#' Silge, J., & Robinson, D. (2017). Text mining with R: A tidy approach.
+#' O'Reilly Media. https://www.tidytextmining.com/
+#'
+#' @concept lexical
+#' @export
+#'
+#' @examples
+#' \donttest{
+#' if (requireNamespace("tidylo", quietly = TRUE)) {
+#'   articles <- TextAnalysisR::SpecialEduTech[1:20, ]
+#'   dfm_object <- quanteda::dfm(quanteda::tokens(articles$abstract))
+#'   quanteda::docvars(dfm_object, "reference_type") <- articles$reference_type
+#'   weighted_odds <- calculate_weighted_log_odds(dfm_object, "reference_type",
+#'                                                 top_n = 5)
+#' }
+#' }
+calculate_weighted_log_odds <- function(dfm_object,
+                                        group_var,
+                                        top_n = 10,
+                                        min_count = 5) {
+
+  if (!requireNamespace("tidylo", quietly = TRUE)) {
+    stop("Package 'tidylo' is required. Please install it with: install.packages('tidylo')")
+  }
+
+  if (!inherits(dfm_object, "dfm")) {
+    stop("dfm_object must be a quanteda dfm object")
+  }
+
+  if (!group_var %in% names(quanteda::docvars(dfm_object))) {
+    stop("group_var '", group_var, "' not found in document variables")
+  }
+
+  # sparse group aggregation keeps memory flat on large corpora
+  grouped_dfm <- quanteda::dfm_group(dfm_object,
+                                     groups = quanteda::docvars(dfm_object)[[group_var]])
+  grouped_counts <- quanteda::convert(grouped_dfm, to = "data.frame")
+  names(grouped_counts)[1] <- group_var
+  grouped_counts <- tidyr::pivot_longer(
+    grouped_counts,
+    cols = -dplyr::all_of(group_var),
+    names_to = "feature",
+    values_to = "n"
+  )
+
+  # group totals and the prior require the full vocabulary
+  result <- tidylo::bind_log_odds(
+    grouped_counts,
+    set = !!rlang::sym(group_var),
+    feature = feature,
+    n = n
+  )
+
+  result <- result %>%
+    dplyr::filter(n >= min_count) %>%
+    dplyr::group_by(.data[[group_var]]) %>%
+    dplyr::slice_max(abs(.data$log_odds_weighted), n = top_n, with_ties = FALSE) %>%
+    dplyr::ungroup() %>%
+    dplyr::arrange(.data[[group_var]], dplyr::desc(abs(.data$log_odds_weighted)))
+
+  result$significant <- abs(result$log_odds_weighted) >= 1.96
+  as.data.frame(result)
+}
+
+
+#' Plot Log Odds Ratio
+#'
+#' @description
+#' Creates a horizontal bar plot showing log odds ratios for comparing
+#' word usage between categories. Positive values indicate higher usage
+#' in the first category, negative in the second.
+#'
+#' @param log_odds_data Data frame from calculate_log_odds_ratio()
+#' @param top_n Number of top terms to show per direction (default: 10)
+#' @param facet_by Character, column name to facet by (e.g., "category1" for
+#'   one_vs_rest comparisons). NULL for no faceting.
+#' @param color_positive Color for positive log odds (default: "#10B981" green)
+#' @param color_negative Color for negative log odds (default: "#EF4444" red)
+#' @param height Plot height in pixels (default: 600)
+#' @param width Plot width in pixels (default: NULL for auto)
+#' @param title Plot title (default: "Log Odds Ratio Comparison")
+#'
+#' @return A plotly object
+#'
+#' @concept visualization
+#' @export
+#'
+#' @examples
+#' \donttest{
+#' articles <- TextAnalysisR::SpecialEduTech[1:20, ]
+#' corpus <- quanteda::corpus(
+#'   articles$abstract,
+#'   docvars = data.frame(reference_type = articles$reference_type)
+#' )
+#' dfm_object <- quanteda::dfm(quanteda::tokens(corpus))
+#' log_odds <- calculate_log_odds_ratio(dfm_object, "reference_type",
+#'                                       comparison_mode = "binary")
+#' plot_log_odds_ratio(log_odds, top_n = 5)
+#' }
+plot_log_odds_ratio <- function(log_odds_data,
+                                 top_n = 10,
+                                 facet_by = NULL,
+                                 color_positive = "#10B981",
+                                 color_negative = "#EF4444",
+                                 height = 600,
+                                 width = NULL,
+                                 title = "Log Odds Ratio Comparison") {
+
+  if (is.null(log_odds_data) || nrow(log_odds_data) == 0) {
+    return(
+      ggplot2::ggplot() +
+        ggplot2::annotate("text", x = 0.5, y = 0.5,
+                          label = "No log odds data available",
+                          size = 5, color = "#ef4444") +
+        ggplot2::theme_void()
+    )
+  }
+
+  positive <- log_odds_data[log_odds_data$log_odds_ratio > 0, ]
+  negative <- log_odds_data[log_odds_data$log_odds_ratio < 0, ]
+
+  positive <- positive[order(positive$log_odds_ratio, decreasing = TRUE), ]
+  negative <- negative[order(negative$log_odds_ratio, decreasing = FALSE), ]
+
+  plot_data <- rbind(
+    utils::head(positive, top_n),
+    utils::head(negative, top_n)
+  )
+
+  if (nrow(plot_data) == 0) {
+    return(
+      ggplot2::ggplot() +
+        ggplot2::annotate("text", x = 0.5, y = 0.5,
+                          label = "No significant differences found",
+                          size = 5, color = "#ef4444") +
+        ggplot2::theme_void()
+    )
+  }
+
+  plot_data <- plot_data[order(plot_data$log_odds_ratio), ]
+  plot_data$term_ordered <- factor(plot_data$term, levels = plot_data$term)
+  plot_data$direction <- ifelse(plot_data$log_odds_ratio > 0, "positive", "negative")
+
+  plot_data$hover_text <- paste0(plot_data$term,
+                                  "\nLog Odds: ", round(plot_data$log_odds_ratio, 3),
+                                  "\n", plot_data$category1, ": ", plot_data$count1,
+                                  "\n", plot_data$category2, ": ", plot_data$count2)
+
+  cat1 <- unique(plot_data$category1)[1]
+  cat2 <- unique(plot_data$category2)[1]
+  subtitle <- paste0(cat2, " (-) vs ", cat1, " (+)")
+
+  ggplot2::ggplot(plot_data, ggplot2::aes(x = log_odds_ratio, y = term_ordered,
+                                           fill = direction, text = hover_text)) +
+    ggplot2::geom_col() +
+    ggplot2::geom_vline(xintercept = 0, linetype = "dotted", color = "#94A3B8") +
+    ggplot2::scale_fill_manual(values = c("positive" = color_positive,
+                                           "negative" = color_negative),
+                                guide = "none") +
+    ggplot2::labs(x = "Log Odds Ratio", y = "",
+                  title = title, subtitle = subtitle) +
+    ggplot2::theme_minimal(base_size = 11) +
+    ggplot2::theme(
+      plot.title = ggplot2::element_text(size = 13, color = "#0c1f4a"),
+      plot.subtitle = ggplot2::element_text(size = 11, color = "#6B7280"),
+      axis.text = ggplot2::element_text(size = 11, color = "#3B3B3B"),
+      axis.title = ggplot2::element_text(size = 12, color = "#0c1f4a")
+    )
+}
+
+
+#' Plot Weighted Log Odds
+#'
+#' @description
+#' Creates a faceted horizontal bar plot showing weighted log odds for comparing
+#' word usage across categories using the Fightin' Words method (Monroe et al. 2008).
+#' Each group is displayed in a separate facet showing its most distinctive terms.
+#'
+#' @param weighted_data Data frame from calculate_weighted_log_odds()
+#' @param top_n Number of top terms to show per group (default: 10)
+#' @param color_positive Color for positive log odds (default: "#10B981" green)
+#' @param color_negative Color for negative log odds (default: "#EF4444" red)
+#' @param height Plot height in pixels (default: 600)
+#' @param width Plot width in pixels (default: NULL for auto)
+#' @param title Plot title (default: "Weighted Log Odds by Group")
+#'
+#' @return A plotly object
+#'
+#' @concept visualization
+#' @export
+#'
+#' @examples
+#' \donttest{
+#' if (requireNamespace("tidylo", quietly = TRUE)) {
+#'   articles <- TextAnalysisR::SpecialEduTech[1:20, ]
+#'   dfm_object <- quanteda::dfm(quanteda::tokens(articles$abstract))
+#'   quanteda::docvars(dfm_object, "reference_type") <- articles$reference_type
+#'   weighted_odds <- calculate_weighted_log_odds(dfm_object, "reference_type",
+#'                                                 top_n = 5)
+#'   plot_weighted_log_odds(weighted_odds)
+#' }
+#' }
+plot_weighted_log_odds <- function(weighted_data,
+                                   top_n = 10,
+                                   color_positive = "#10B981",
+                                   color_negative = "#EF4444",
+                                   height = 600,
+                                   width = NULL,
+                                   title = "Weighted Log Odds by Group") {
+
+  if (is.null(weighted_data) || nrow(weighted_data) == 0) {
+    return(
+      ggplot2::ggplot() +
+        ggplot2::annotate("text", x = 0.5, y = 0.5,
+                          label = "No weighted log odds data available",
+                          size = 5, color = "#ef4444") +
+        ggplot2::theme_void()
+    )
+  }
+
+  group_col <- setdiff(names(weighted_data), c("feature", "n", "log_odds_weighted", "log_odds"))[1]
+
+  if (is.null(group_col)) {
+    return(
+      ggplot2::ggplot() +
+        ggplot2::annotate("text", x = 0.5, y = 0.5,
+                          label = "Could not identify group column",
+                          size = 5, color = "#ef4444") +
+        ggplot2::theme_void()
+    )
+  }
+
+  plot_data <- weighted_data %>%
+    dplyr::group_by(.data[[group_col]]) %>%
+    dplyr::slice_max(abs(log_odds_weighted), n = top_n, with_ties = FALSE) %>%
+    dplyr::ungroup() %>%
+    dplyr::mutate(
+      direction = ifelse(log_odds_weighted > 0, "positive", "negative"),
+      hover_text = paste0("Term: ", feature,
+                          "<br>Log Odds: ", round(log_odds_weighted, 3),
+                          "<br>", group_col, ": ", .data[[group_col]]),
+      feature = tidytext::reorder_within(feature, log_odds_weighted, .data[[group_col]])
+    )
+
+  ggplot2::ggplot(plot_data, ggplot2::aes(x = log_odds_weighted, y = feature,
+                                          fill = direction, text = hover_text)) +
+    ggplot2::geom_col() +
+    ggplot2::geom_vline(xintercept = 0, linetype = "dotted", color = "#94A3B8") +
+    ggplot2::facet_wrap(stats::as.formula(paste("~", group_col)), scales = "free_y") +
+    tidytext::scale_y_reordered() +
+    ggplot2::scale_fill_manual(values = c("positive" = color_positive,
+                                          "negative" = color_negative),
+                               guide = "none") +
+    ggplot2::labs(x = "Log Odds (Weighted)", y = "", title = title) +
+    ggplot2::theme_minimal(base_size = 11) +
+    ggplot2::theme(
+      plot.title = ggplot2::element_text(size = 13, color = "#0c1f4a", hjust = 0.5),
+      axis.text = ggplot2::element_text(size = 11, color = "#3B3B3B"),
+      axis.title = ggplot2::element_text(size = 12, color = "#0c1f4a"),
+      strip.text = ggplot2::element_text(size = 12, color = "#0c1f4a")
+    )
+}
+
+
+# Lexical dispersion analysis
+
+#' Calculate Lexical Dispersion
+#'
+#' @description
+#' Computes lexical dispersion data for specified terms across a corpus.
+#' Shows where terms appear within each document, useful for understanding
+#' term distribution patterns.
+#'
+#' @param tokens_object A quanteda tokens object
+#' @param terms Character vector of terms to analyze
+#' @param scale Character, "relative" (0-1 normalized) or "absolute" (token position)
+#'
+#' @return Data frame with columns:
+#'   \itemize{
+#'     \item doc_id: Document identifier
+#'     \item term: The search term
+#'     \item position: Position in document (relative or absolute)
+#'     \item doc_length: Total tokens in document
+#'   }
+#'
+#' @concept lexical
+#' @export
+#'
+#' @examples
+#' \donttest{
+#' tokens <- quanteda::tokens(TextAnalysisR::SpecialEduTech$abstract[1:5])
+#' dispersion <- calculate_lexical_dispersion(tokens, c("learning", "instruction"))
+#' }
+calculate_lexical_dispersion <- function(tokens_object,
+                                          terms,
+                                          scale = c("relative", "absolute")) {
+
+  scale <- match.arg(scale)
+
+
+  if (!inherits(tokens_object, "tokens")) {
+    stop("tokens_object must be a quanteda tokens object")
+  }
+
+  if (is.null(terms) || length(terms) == 0) {
+    return(data.frame(
+      doc_id = character(),
+      term = character(),
+      position = numeric(),
+      doc_length = integer(),
+      stringsAsFactors = FALSE
+    ))
+  }
+
+  results <- list()
+
+  for (i in seq_along(tokens_object)) {
+    doc_tokens <- as.character(tokens_object[[i]])
+    doc_tokens_lower <- tolower(doc_tokens)
+    doc_length <- length(doc_tokens)
+    doc_name <- names(tokens_object)[i]
+
+    if (is.null(doc_name) || doc_name == "") {
+      doc_name <- paste0("Doc ", i)
+    }
+
+    for (term in terms) {
+      term_lower <- tolower(term)
+      positions <- which(doc_tokens_lower == term_lower)
+
+      if (length(positions) > 0) {
+        if (scale == "relative") {
+          positions <- positions / doc_length
+        }
+
+        results[[length(results) + 1]] <- data.frame(
+          doc_id = rep(doc_name, length(positions)),
+          term = rep(term, length(positions)),
+          position = positions,
+          doc_length = rep(doc_length, length(positions)),
+          stringsAsFactors = FALSE
+        )
+      }
+    }
+  }
+
+  if (length(results) == 0) {
+    return(data.frame(
+      doc_id = character(),
+      term = character(),
+      position = numeric(),
+      doc_length = integer(),
+      stringsAsFactors = FALSE
+    ))
+  }
+
+  do.call(rbind, results)
+}
+
+
+#' Plot Lexical Dispersion
+#'
+#' @description
+#' Creates an X-ray plot showing where terms appear across documents.
+#' Each row represents a term, and marks indicate occurrences.
+#'
+#' @param dispersion_data Data frame from calculate_lexical_dispersion()
+#' @param scale Character, "relative" or "absolute" (must match calculation)
+#' @param title Plot title (default: "Lexical Dispersion")
+#' @param colors Named vector of colors for each term, or NULL for auto
+#' @param height Plot height in pixels (default: 400)
+#' @param width Plot width in pixels (default: NULL for auto)
+#' @param marker_size Size of position markers (default: 8)
+#'
+#' @return A plotly object
+#'
+#' @concept visualization
+#' @export
+#'
+#' @examples
+#' \donttest{
+#' tokens <- quanteda::tokens(TextAnalysisR::SpecialEduTech$abstract[1:5])
+#' dispersion <- calculate_lexical_dispersion(tokens, c("learning", "instruction"))
+#' plot_lexical_dispersion(dispersion)
+#' }
+plot_lexical_dispersion <- function(dispersion_data,
+                                     scale = "relative",
+                                     title = "Lexical Dispersion",
+                                     colors = NULL,
+                                     height = 400,
+                                     width = NULL,
+                                     marker_size = 8) {
+
+  if (is.null(dispersion_data) || nrow(dispersion_data) == 0) {
+    return(
+      ggplot2::ggplot() +
+        ggplot2::annotate("text", x = 0.5, y = 0.5,
+                          label = "No term occurrences found in the corpus",
+                          size = 5, color = "#ef4444") +
+        ggplot2::theme_void()
+    )
+  }
+
+  unique_terms <- unique(dispersion_data$term)
+
+  if (is.null(colors)) {
+    default_colors <- c("#3B82F6", "#10B981", "#F59E0B", "#EF4444",
+                        "#8B5CF6", "#EC4899", "#06B6D4", "#84CC16")
+    colors <- stats::setNames(
+      rep(default_colors, length.out = length(unique_terms)),
+      unique_terms
+    )
+  }
+
+  dispersion_data$term <- factor(dispersion_data$term, levels = rev(unique_terms))
+
+  dispersion_data$hover_text <- paste0(
+    "Term: ", dispersion_data$term,
+    "<br>Document: ", dispersion_data$doc_id,
+    "<br>Position: ", round(dispersion_data$position, 3),
+    if (scale == "relative") " (relative)" else ""
+  )
+
+  x_label <- if (scale == "relative") {
+    "Relative Position (0 = start, 1 = end)"
+  } else {
+    "Token Position"
+  }
+
+  term_levels <- levels(dispersion_data$term)
+  dispersion_data$term_num <- as.numeric(dispersion_data$term)
+
+  p <- ggplot2::ggplot(dispersion_data, ggplot2::aes(color = term)) +
+    suppressWarnings(ggplot2::geom_segment(ggplot2::aes(x = position, xend = position,
+                                        y = term_num - 0.4, yend = term_num + 0.4,
+                                        text = hover_text),
+                          linewidth = 0.3, alpha = 0.7)) +
+    suppressWarnings(ggplot2::geom_point(ggplot2::aes(x = position, y = term_num, text = hover_text),
+                        size = 4, alpha = 0)) +
+    ggplot2::scale_y_continuous(breaks = seq_along(term_levels), labels = term_levels) +
+    ggplot2::scale_color_manual(values = colors) +
+    ggplot2::labs(x = x_label, y = "", title = title, color = "") +
+    ggplot2::theme_minimal(base_size = 11) +
+    ggplot2::theme(
+      plot.title = ggplot2::element_text(size = 13, color = "#0c1f4a"),
+      axis.text = ggplot2::element_text(size = 11, color = "#3B3B3B"),
+      axis.title = ggplot2::element_text(size = 12, color = "#0c1f4a"),
+      legend.title = ggplot2::element_text(size = 12, color = "#0c1f4a"),
+      legend.text = ggplot2::element_text(size = 12, color = "#3B3B3B"),
+      legend.position = "bottom"
+    )
+
+  if (scale == "relative") {
+    p <- p + ggplot2::xlim(0, 1)
+  }
+
+  p
+}
+
+
+#' Calculate Dispersion Metrics
+#'
+#' @description
+#' Computes quantitative dispersion metrics for terms, measuring how
+#' evenly distributed they are across the corpus.
+#'
+#' @param tokens_object A quanteda tokens object
+#' @param terms Character vector of terms to analyze
+#'
+#' @return Data frame with columns:
+#'   \itemize{
+#'     \item term: The search term
+#'     \item frequency: Total occurrences
+#'     \item doc_count: Number of documents containing term
+#'     \item doc_ratio: Proportion of documents containing term
+#'     \item juilland_d: Juilland's D dispersion (0-1, higher = more even),
+#'       computed on within-document proportions
+#'     \item rosengren_s: Rosengren's S dispersion adjusted for document
+#'       sizes (1/n_docs to 1, higher = more even)
+#'   }
+#'
+#' @concept lexical
+#' @export
+calculate_dispersion_metrics <- function(tokens_object, terms) {
+
+  if (!inherits(tokens_object, "tokens")) {
+    stop("tokens_object must be a quanteda tokens object")
+  }
+
+  n_docs <- length(tokens_object)
+  doc_lengths <- quanteda::ntoken(tokens_object)
+  corpus_size <- sum(doc_lengths)
+
+  results <- lapply(terms, function(term) {
+    term_lower <- tolower(term)
+
+    # Count occurrences in each document
+    doc_counts <- vapply(tokens_object, function(doc_tokens) {
+      sum(tolower(as.character(doc_tokens)) == term_lower)
+    }, integer(1))
+
+    total_freq <- sum(doc_counts)
+    doc_count <- sum(doc_counts > 0)
+    doc_ratio <- doc_count / n_docs
+
+    # Juilland's D: population SD of within-document proportions
+    nonempty <- doc_lengths > 0
+    n_parts <- sum(nonempty)
+    if (total_freq > 0 && n_parts > 1) {
+      p <- doc_counts[nonempty] / doc_lengths[nonempty]
+      pop_sd <- sqrt(mean((p - mean(p))^2))
+      juilland_d <- 1 - (pop_sd / mean(p)) / sqrt(n_parts - 1)
+      juilland_d <- max(0, min(1, juilland_d))
+    } else {
+      juilland_d <- NA_real_
+    }
+
+    # size-adjusted Rosengren's S: (sum sqrt(s_i * v_i))^2 / f
+    if (total_freq > 0 && n_docs > 1 && corpus_size > 0) {
+      s <- doc_lengths / corpus_size
+      rosengren_s <- sum(sqrt(s * doc_counts))^2 / total_freq
+    } else {
+      rosengren_s <- NA_real_
+    }
+
+    data.frame(
+      term = term,
+      frequency = total_freq,
+      doc_count = doc_count,
+      doc_ratio = round(doc_ratio, 3),
+      juilland_d = round(juilland_d, 3),
+      rosengren_s = round(rosengren_s, 3),
+      stringsAsFactors = FALSE
+    )
+  })
+
+  do.call(rbind, results)
+}

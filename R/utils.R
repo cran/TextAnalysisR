@@ -1,0 +1,3324 @@
+#' Pipe operator
+#'
+#' See \code{magrittr::\link[magrittr:pipe]{\%>\%}} for details.
+#'
+#' @name %>%
+#' @rdname pipe
+#' @keywords internal
+#' @export
+#' @importFrom magrittr %>%
+#' @usage lhs \%>\% rhs
+#' @param lhs A value or the magrittr placeholder.
+#' @param rhs A function call using the magrittr semantics.
+#' @return The result of calling `rhs(lhs)`.
+NULL
+
+
+
+globalVariables(names = c(
+  ".", ".max_idx", ".row_idx", "categorical_var", "centrality", "col_idx",
+  "collocation", "community", "continuous_var", "cooccur_count", "correlation",
+  "correlation_rounded", "degree_log", "document", "eigenvector", "emotion",
+  "entity", "estimate", "feature", "frequency", "from", "generated_content", "group", "size_metric_log",
+  "interview_question", "item1", "item2", "label", "labeled_topic", "line_group",
+  "lower", "max_corr", "max_count", "max_similarity", "metric_value", "min_corr",
+  "min_count", "model_type", "n", "n_sentiment_words", "name", "negative", "rate ratio",
+  "odds.ratio", "ord", "other_category", "other_id", "other_idx", "other_name",
+  "p.value", "percent", "policy_recommendation", "pos", "positive", "proportion",
+  "ref_id", "ref_idx", "ref_name", "research_question", "row_idx", "score",
+  "sentiment", "sentiment_score", "similarity", "statistic", "std.error",
+  "std.error (rate ratio)", "survey_item", "term", "term_proportion",
+  "terms", "text", "theme_description", "to",
+  "topic", "topic_display", "topic_label", "total_count", "total_score", "tt",
+  "united_texts", "upper", "value", "word", "word_frequency", "x", "xend",
+  "y", "yend",
+  "Count", "Keyness_Score", "Keyword", "Keyword_ordered", "Metric",
+  "Percentage", "Score", "TF_IDF_Score", "Value", "collocation_ordered",
+  "direction", "doc_ordered", "entity_ordered", "feature_ordered", "k",
+  "log_odds_ratio", "log_odds_weighted", "metric_val", "pos_ordered",
+  "position", "term_ordered", "count", "term_num"
+))
+
+
+
+#' @importFrom utils modifyList
+#' @importFrom stats cor
+NULL
+
+
+# Utility and Helper Functions
+# General-purpose utility functions for analysis and visualization
+
+#
+# Deployment Detection Utilities
+#
+
+#' Check Docker Deployment
+#'
+#' @description
+#' Detects whether the app is running in a Docker container.
+#' Docker deployments have full Python/spaCy capability.
+#'
+#' @return Logical TRUE if running in Docker
+#'
+#' @keywords internal
+check_docker_deployment <- function() {
+  has_dockerenv <- file.exists("/.dockerenv")
+  has_docker_env_var <- nzchar(Sys.getenv("TEXTANALYSISR_DOCKER"))
+  has_docker_container <- nzchar(Sys.getenv("DOCKER_CONTAINER"))
+
+  return(has_dockerenv || has_docker_env_var || has_docker_container)
+}
+
+#' Check Deployment Environment
+#'
+#' @description
+#' Detects whether the app is running on a web server (shinyapps.io, Posit Connect)
+#' versus locally via `run_app()`.
+#'
+#' @return Logical TRUE if running on web server, FALSE if local
+#'
+#' @keywords internal
+#'
+check_web_deployment <- function() {
+  # Docker has Python/spaCy available - not a restricted deployment
+  if (check_docker_deployment()) {
+    return(FALSE)
+  }
+
+  # Check for restricted web servers (no Python)
+  shinyapps <- Sys.getenv("R_CONFIG_ACTIVE") == "shinyapps"
+  shinyapps_io <- grepl("shinyapps", Sys.getenv("SHINY_SERVER_URL", ""), ignore.case = TRUE)
+  connect <- nzchar(Sys.getenv("RSTUDIO_CONNECT_HASTE"))
+
+  return(shinyapps || shinyapps_io || connect)
+}
+
+#' Check Feature Status
+#'
+#' @description
+#' Checks if a specific optional feature is available in the current environment.
+#'
+#' @param feature Character: "python", "pdf_tables", "embeddings", "sentiment_transformer"
+#'
+#' @return Logical TRUE if feature is available
+#'
+#' @keywords internal
+#'
+check_feature <- function(feature) {
+  feature <- tolower(feature)
+
+  if (check_web_deployment()) {
+    return(feature %in% c("core", "lexical", "stm"))
+  }
+
+  switch(feature,
+    "python" = tryCatch({
+      status <- check_python_env()
+      isTRUE(status$available)
+    }, error = function(e) FALSE),
+    "pdf_tables" = tryCatch({
+      status <- check_python_env()
+      isTRUE(status$available) && isTRUE(status$packages$pdfplumber)
+    }, error = function(e) FALSE),
+    "embeddings" = tryCatch({
+      requireNamespace("reticulate", quietly = TRUE) &&
+        reticulate::py_module_available("sentence_transformers")
+    }, error = function(e) FALSE),
+    "sentiment_transformer" = tryCatch({
+      requireNamespace("reticulate", quietly = TRUE) &&
+        reticulate::py_module_available("transformers")
+    }, error = function(e) FALSE),
+    TRUE
+  )
+}
+
+#' Get Feature Status
+#'
+#' @description
+#' Returns availability status for all optional features.
+#'
+#' @return Named list with feature availability
+#'
+#' @keywords internal
+#'
+get_feature_status <- function() {
+  features <- c("python", "pdf_tables", "embeddings", "sentiment_transformer")
+  result <- lapply(features, function(f) {
+    tryCatch(check_feature(f), error = function(e) FALSE)
+  })
+  names(result) <- features
+  result$web <- check_web_deployment()
+  result$local <- !check_web_deployment()
+  return(result)
+}
+
+#' Show Web Deployment Banner
+#'
+#' @param disabled Optional character vector naming features to mark as
+#'   disabled in the banner; \code{NULL} (default) shows the standard set.
+#' @return A \code{shiny.tag} object containing the banner HTML for
+#'   inclusion in a Shiny UI, or \code{NULL} when not running in a web
+#'   deployment context.
+#' @keywords internal
+#' @export
+show_web_banner <- function(disabled = NULL) {
+  if (!check_web_deployment()) return(NULL)
+
+  if (is.null(disabled)) {
+    disabled <- c("Python PDF processing", "Local AI",
+                  "Embedding analysis", "Large files (>10MB)")
+  }
+
+  feature_list <- paste0("<li>", htmltools::htmlEscape(disabled), "</li>", collapse = "")
+
+  shiny::tagList(
+    shiny::tags$details(
+      class = "web-version-note",
+      style = "margin: 10px; padding: 8px 12px; background-color: #EFF6FF; border: 1px solid #BFDBFE; border-radius: 6px; font-size: 14px;",
+      shiny::tags$summary(
+        style = "cursor: pointer; color: #1E40AF; font-weight: 500;",
+        shiny::icon("info-circle"),
+        " Web version - some features limited"
+      ),
+      shiny::tags$div(
+        style = "margin-top: 8px; padding-left: 5px; color: #374151;",
+        shiny::tags$p(
+          style = "margin: 5px 0;",
+          "For full features: ",
+          shiny::tags$code(
+            style = "background: #F3F4F6; padding: 2px 6px; border-radius: 3px; font-size: 13px;",
+            "install.packages('TextAnalysisR', repos = c('https://mshin77.r-universe.dev', 'https://cloud.r-project.org'))"
+          )
+        ),
+        shiny::HTML(paste0("<ul style='margin: 5px 0; padding-left: 20px; color: #6B7280;'>", feature_list, "</ul>"))
+      )
+    )
+  )
+}
+
+#' Require Feature
+#'
+#' @description
+#' Checks feature availability and shows notification if unavailable.
+#'
+#' @param feature Character: feature name to check
+#' @param session Shiny session object (optional)
+#'
+#' @return Logical TRUE if available, FALSE if not
+#'
+#' @keywords internal
+#'
+require_feature <- function(feature, session = NULL) {
+  if (check_feature(feature)) return(TRUE)
+
+  msg <- switch(feature,
+    "python" = "Python not configured. Run setup_python_env().",
+    "pdf_tables" = "PDF tables require Python. Run setup_python_env().",
+    "embeddings" = "Embeddings require sentence-transformers. Run: pip install sentence-transformers torch",
+    "sentiment_transformer" = "Neural sentiment requires transformers. Run: pip install transformers torch",
+    paste0("Feature '", feature, "' not available.")
+  )
+
+  if (check_web_deployment()) {
+    msg <- paste(msg, "Only available in R package version.")
+  }
+
+  if (!is.null(session)) {
+    shiny::showNotification(msg, type = "warning", duration = 8)
+  } else {
+    message(msg)
+  }
+
+  return(FALSE)
+}
+
+#' Create Formatted Analysis Data Table
+#'
+#' @description Creates a consistently formatted DT::datatable for analysis results with
+#' export buttons and optional numeric formatting.
+#'
+#' @param data Data frame to display
+#' @param colnames Optional character vector of column names for display
+#' @param numeric_cols Optional character vector of numeric columns to round
+#' @param digits Number of digits for rounding numeric columns (default: 3)
+#' @param export_formats Character vector of export formats (default: c('copy', 'csv', 'excel', 'pdf', 'print'))
+#' @param page_length Number of rows per page (default: 25)
+#' @param font_size Font size for table cells (default: "16px")
+#'
+#' @return A DT::datatable object
+#'
+#' @keywords internal
+#'
+create_analysis_datatable <- function(data,
+                                      colnames = NULL,
+                                      numeric_cols = NULL,
+                                      digits = 3,
+                                      export_formats = c("copy", "csv", "excel", "pdf", "print"),
+                                      page_length = 25,
+                                      font_size = "16px") {
+
+  dt <- DT::datatable(
+    data,
+    colnames = colnames,
+    rownames = FALSE,
+    extensions = "Buttons",
+    options = list(
+      scrollX = TRUE,
+      pageLength = page_length,
+      dom = "Bfrtip",
+      buttons = export_formats
+    )
+  )
+
+  if (!is.null(numeric_cols) && length(numeric_cols) > 0) {
+    valid_cols <- intersect(numeric_cols, names(data))
+    if (length(valid_cols) > 0) {
+      dt <- DT::formatRound(dt, columns = valid_cols, digits = digits)
+    }
+  }
+
+  dt <- DT::formatStyle(dt, columns = names(data), `font-size` = font_size)
+
+  return(dt)
+}
+
+#' Calculate Cosine Similarity Matrix
+#'
+#' @description Calculates the cosine similarity between all pairs of rows in a matrix.
+#' @param matrix_data A numeric matrix where rows represent documents/observations
+#' @return A square similarity matrix with values between -1 and 1
+#' @keywords internal
+#' @export
+calculate_cosine_similarity <- function(matrix_data) {
+  if (is.null(matrix_data) || nrow(matrix_data) == 0 || ncol(matrix_data) == 0) {
+    return(matrix(1, nrow = 1, ncol = 1))
+  }
+
+  matrix_data[!is.finite(matrix_data)] <- 0
+
+  normalized_matrix <- t(apply(matrix_data, 1, function(row) {
+    norm <- sqrt(sum(row^2, na.rm = TRUE))
+    if (norm > 0 && is.finite(norm)) {
+      return(row / norm)
+    } else {
+      return(rep(0, length(row)))
+    }
+  }))
+
+  normalized_matrix[!is.finite(normalized_matrix)] <- 0
+
+  similarity_matrix <- normalized_matrix %*% t(normalized_matrix)
+
+  similarity_matrix[!is.finite(similarity_matrix)] <- 0
+  diag(similarity_matrix) <- 1
+  similarity_matrix[similarity_matrix > 1] <- 1
+  similarity_matrix[similarity_matrix < -1] <- -1
+
+  return(similarity_matrix)
+}
+
+#' Create Error Plot for Plotly
+#'
+#' @description Creates a plotly error/status plot with a message
+#' @param message The message to display
+#' @param color Color for the text (default: "#ef4444")
+#' @return A plotly plot object displaying the message
+#' @keywords internal
+plot_error <- function(message, color = "#ef4444") {
+  if (!requireNamespace("plotly", quietly = TRUE)) {
+    stop("plotly package is required for this function. ",
+         "Please install it with: install.packages('plotly')")
+  }
+
+  plotly::plot_ly(type = "scatter", mode = "markers") %>%
+    plotly::add_annotations(
+      text = message,
+      xref = "paper",
+      yref = "paper",
+      x = 0.5,
+      y = 0.5,
+      showarrow = FALSE,
+      font = list(size = 14, color = color),
+      xanchor = "center",
+      yanchor = "middle"
+    ) %>%
+    plotly::layout(
+      xaxis = list(visible = FALSE),
+      yaxis = list(visible = FALSE),
+      margin = list(t = 40, r = 40, b = 40, l = 40),
+      plot_bgcolor = "white",
+      paper_bgcolor = "white"
+    )
+}
+
+
+#' @title Complete Text Mining Workflow
+#'
+#' @description
+#' This function provides a complete text mining workflow that follows the same sequence
+#' as the Shiny application: file processing -> text uniting -> preprocessing ->
+#' DFM creation -> analysis.
+#' It serves as a convenience function for users who want to execute the entire
+#' pipeline programmatically.
+#'
+#' @param dataset_choice A character string indicating the dataset choice:
+#'   "Upload an Example Dataset", "Upload Your File", "Copy and Paste Text".
+#' @param file_info A data frame containing file information (for file upload).
+#' @param text_input A character string containing text input (for copy-paste).
+#' @param listed_vars A character vector of column names to unite into text.
+#' @param min_char The minimum number of characters for tokens (default: 2).
+#' @param remove_punct Logical; remove punctuation (default: TRUE).
+#' @param remove_symbols Logical; remove symbols (default: TRUE).
+#' @param remove_numbers Logical; remove numbers (default: TRUE).
+#' @param remove_url Logical; remove URLs (default: TRUE).
+#' @param detect_compounds Logical; detect multi-word expressions (default: FALSE).
+#' @param compound_size Size range for compound detection (default: 2:3).
+#' @param compound_min_count Minimum count for compounds (default: 2).
+#' @param verbose Logical; print progress messages (default: TRUE).
+#'
+#' @return A list containing processed data, tokens, DFM, and metadata.
+#'
+#' @export
+#'
+#' @examples
+#' \donttest{
+#'   workflow_result <- TextAnalysisR::run_text_workflow(
+#'     dataset_choice = "Upload an Example Dataset",
+#'     listed_vars = c("title", "keyword", "abstract")
+#'   )
+#' }
+#' if (interactive()) {
+#'   file_info <- data.frame(filepath = "path/to/file.xlsx")
+#'   workflow_result <- TextAnalysisR::run_text_workflow(
+#'     dataset_choice = "Upload Your File",
+#'     file_info = file_info,
+#'     listed_vars = c("column1", "column2")
+#'   )
+#'
+#'   workflow_result <- TextAnalysisR::run_text_workflow(
+#'     dataset_choice = "Copy and Paste Text",
+#'     text_input = "Your text content here",
+#'     listed_vars = "text"
+#'   )
+#' }
+run_text_workflow <- function(dataset_choice,
+                                         file_info = NULL,
+                                         text_input = NULL,
+                                         listed_vars,
+                                         min_char = 2,
+                                         remove_punct = TRUE,
+                                         remove_symbols = TRUE,
+                                         remove_numbers = TRUE,
+                                         remove_url = TRUE,
+                                         detect_compounds = FALSE,
+                                         compound_size = 2:3,
+                                         compound_min_count = 2,
+                                         verbose = TRUE) {
+
+  if (verbose) message("Starting complete text mining workflow...")
+  start_time <- Sys.time()
+
+  if (verbose) message("Step 1: Processing files...")
+  processed_data <- import_files(
+    dataset_choice = dataset_choice,
+    file_info = file_info,
+    text_input = text_input
+  )
+
+  if (verbose) message("Step 2: Uniting text columns...")
+  united_data <- unite_cols(processed_data, listed_vars = listed_vars)
+
+  if (verbose) message("Step 3: Preprocessing texts...")
+  tokens <- prep_texts(
+    united_tbl = united_data,
+    text_field = "united_texts",
+    min_char = min_char,
+    remove_punct = remove_punct,
+    remove_symbols = remove_symbols,
+    remove_numbers = remove_numbers,
+    remove_url = remove_url,
+    verbose = verbose
+  )
+
+  compounds <- NULL
+  if (detect_compounds) {
+    if (verbose) message("Step 4: Detecting multi-word expressions...")
+    compounds <- detect_multi_words(
+      tokens = tokens,
+      size = compound_size,
+      min_count = compound_min_count
+    )
+
+    if (length(compounds) > 0) {
+      tokens <- quanteda::tokens_compound(tokens, compounds)
+    }
+  }
+
+  if (verbose) message("Step 5: Creating document-feature matrix...")
+  dfm_object <- quanteda::dfm(tokens)
+
+  execution_time <- as.numeric(difftime(Sys.time(), start_time, units = "secs"))
+
+  if (verbose) {
+    message("Complete text mining workflow finished in ", round(execution_time, 2), " seconds")
+    message("Documents processed: ", quanteda::ndoc(dfm_object))
+    message("Features identified: ", quanteda::nfeat(dfm_object))
+  }
+
+  return(list(
+    raw_data = processed_data,
+    united_data = united_data,
+    tokens = tokens,
+    compounds = compounds,
+    dfm = dfm_object,
+    workflow_info = list(
+      dataset_choice = dataset_choice,
+      listed_vars = listed_vars,
+      compounds_detected = !is.null(compounds),
+      execution_time = execution_time,
+      timestamp = Sys.time()
+    )
+  ))
+}
+
+# broom has no tidy method for zeroinfl; extract the count component
+.tidy_count_model <- function(model) {
+  if (!inherits(model, "zeroinfl")) {
+    return(broom::tidy(model))
+  }
+  cf <- summary(model)$coefficients$count
+  tibble::tibble(
+    term = rownames(cf),
+    estimate = cf[, 1],
+    std.error = cf[, 2],
+    statistic = cf[, 3],
+    p.value = cf[, 4]
+  )
+}
+
+#' @title Analyze and Visualize Word Frequencies Across a Continuous Variable
+#'
+#' @description
+#' This function analyzes and visualizes word frequencies across a continuous variable.
+#'
+#' @param dfm_object A quanteda document-feature matrix (dfm).
+#' @param continuous_variable A continuous variable in the metadata.
+#' @param selected_terms A vector of terms to analyze trends for.
+#' @param height The height of the resulting Plotly plot, in pixels (default: 500).
+#' @param width The width of the resulting Plotly plot, in pixels (default: 900).
+#'
+#' @return A list containing Plotly objects and tables with the results.
+#'
+#' @details This function requires a fitted STM model object and a quanteda dfm object.
+#' The continuous variable should be a column in the metadata of the dfm object.
+#' The selected terms should be a vector of terms to analyze trends for.
+#' The required packages are 'htmltools', 'splines', and 'broom' (plus
+#' additional ones loaded internally).
+#'
+#' @importFrom stats glm reformulate binomial
+#'
+#' @seealso [extract_keywords_tfidf()] and [extract_keywords_keyness()] for ranking terms by importance; [plot_word_frequency()] for the standard frequency-by-doc plot
+#' @export
+#'
+#' @examples
+#' \donttest{
+#'   mydata <- TextAnalysisR::SpecialEduTech
+#'
+#'   united_tbl <- TextAnalysisR::unite_cols(
+#'     mydata,
+#'     listed_vars = c("title", "keyword", "abstract")
+#'   )
+#'
+#'   tokens <- TextAnalysisR::prep_texts(united_tbl, text_field = "united_texts")
+#'
+#'   dfm_object <- quanteda::dfm(tokens)
+#'
+#'   word_freq_results <- TextAnalysisR::calculate_word_frequency(
+#'     dfm_object,
+#'     continuous_variable = "year",
+#'     selected_terms = c("calculator", "computer"),
+#'     height = 500,
+#'     width = 900
+#'   )
+#'   print(word_freq_results$plot)
+#'   print(word_freq_results$table)
+#' }
+calculate_word_frequency <- function(dfm_object,
+                                 continuous_variable,
+                                 selected_terms,
+                                 height = 500,
+                                 width = 900) {
+
+  if (!requireNamespace("htmltools", quietly = TRUE) ||
+      !requireNamespace("MASS", quietly = TRUE) ||
+      !requireNamespace("pscl", quietly = TRUE) ||
+      !requireNamespace("broom", quietly = TRUE)) {
+    stop(
+      "The 'htmltools', 'pscl', 'MASS', and 'broom' packages are required for this functionality. ",
+      "Please install them using install.packages(c('htmltools', 'MASS', 'pscl', 'broom'))."
+    )
+  }
+
+  dfm_outcome_obj <- dfm_object
+  # dense conversion keeps zero counts so regressions include all documents
+  dfm_selected <- quanteda::dfm_select(dfm_outcome_obj, pattern = selected_terms,
+                                       selection = "keep", valuetype = "fixed")
+  dfm_td <- quanteda::convert(dfm_selected, to = "data.frame")
+  names(dfm_td)[1] <- "document"
+  dfm_td <- tidyr::pivot_longer(dfm_td, cols = -"document",
+                                names_to = "term", values_to = "count")
+
+  docvars_df <- quanteda::docvars(dfm_outcome_obj)
+  docvars_df$document <- quanteda::docnames(dfm_outcome_obj)
+
+  dfm_td <- dfm_td %>%
+    left_join(docvars_df,
+              by = c("document" = "document"))
+
+  con_var_term_counts <- dfm_td %>%
+    tibble::as_tibble() %>%
+    mutate(word_frequency = count)
+
+  con_var_term_gg <- con_var_term_counts %>%
+    mutate(term = factor(term, levels = selected_terms)) %>%
+    mutate(across(where(is.numeric), ~ round(., 3))) %>%
+    filter(term %in% selected_terms) %>%
+    ggplot(aes(
+      x = !!rlang::sym(continuous_variable),
+      y = word_frequency,
+      group = term
+    )) +
+    geom_point(color = "#337ab7", alpha = 0.6, size = 1) +
+    geom_line(color = "#337ab7", alpha = 0.6, linewidth = 0.5) +
+    facet_wrap(~ term, scales = "free") +
+    ggplot2::scale_y_continuous(labels = scales::number_format(accuracy = 1)) +
+    labs(y = "Word Frequency") +
+    theme_minimal(base_size = 11) +
+    theme(
+      legend.position = "none",
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      axis.line = element_line(color = "#3B3B3B", linewidth = 0.3),
+      axis.ticks = element_line(color = "#3B3B3B", linewidth = 0.3),
+      strip.text.x = element_text(size = 11, color = "#3B3B3B", face = "bold"),
+      axis.text.x = element_text(size = 11, color = "#3B3B3B"),
+      axis.text.y = element_text(size = 11, color = "#3B3B3B"),
+      axis.title = element_text(size = 11, color = "#3B3B3B"),
+      axis.title.x = element_text(margin = margin(t = 9)),
+      axis.title.y = element_text(margin = margin(r = 11))
+    )
+
+  con_var_term_plot <- con_var_term_gg
+
+  significance_results <- con_var_term_counts %>%
+    mutate(word = term) %>%
+    filter(word %in% selected_terms) %>%
+    group_by(word) %>%
+    group_modify(~ {
+      continuous_var <- if (is.null(continuous_variable) ||
+                            length(continuous_variable) == 0) {
+        stop("No continuous variable selected.")
+      } else {
+        continuous_variable[1]
+      }
+
+      df <- .x %>%
+        dplyr::mutate(
+          word_frequency = as.numeric(word_frequency),
+          !!continuous_var := as.numeric(!!rlang::sym(continuous_var))
+        ) %>%
+        dplyr::filter(is.finite(word_frequency) &
+                        is.finite(!!rlang::sym(continuous_var)))
+
+      if (length(unique(df$word_frequency)) <= 1) {
+        return(tibble::tibble(term = NA, estimate = NA, std.error = NA,
+                              statistic = NA, p.value = NA,
+                              `rate ratio` = NA, var.diag = NA,
+                              `std.error (rate ratio)` = NA,
+                              model_type = "Insufficient data"))
+      }
+
+      if (length(unique(df[[continuous_var]])) <= 1) {
+        return(tibble::tibble(term = NA, estimate = NA, std.error = NA,
+                              statistic = NA, p.value = NA,
+                              `rate ratio` = NA, var.diag = NA,
+                              `std.error (rate ratio)` = NA,
+                              model_type = "Insufficient data"))
+      }
+
+      if (nrow(df) < 2) {
+        return(tibble::tibble(term = NA, estimate = NA, std.error = NA,
+                              statistic = NA, p.value = NA,
+                              `rate ratio` = NA, var.diag = NA,
+                              `std.error (rate ratio)` = NA,
+                              model_type = "Insufficient data"))
+      }
+
+      formula_simple <- as.formula(paste0("word_frequency ~ ", continuous_var))
+
+      mean_count <- mean(df$word_frequency, na.rm = TRUE)
+      var_count <- var(df$word_frequency, na.rm = TRUE)
+      dispersion_ratio <- ifelse(mean_count != 0, var_count / mean_count, NA)
+      prop_zero <- mean(df$word_frequency == 0, na.rm = TRUE)
+
+      model <- NULL
+
+      if (prop_zero > 0.5) {
+        model <- tryCatch(
+          pscl::zeroinfl(formula_simple, data = df, dist = "negbin", link = "logit"),
+          error = function(e) {
+            return(NULL)
+          }
+        )
+        if (!is.null(model)) {
+          model_type <- "Zero-Inflated Negative Binomial"
+        }
+      }
+
+      if (is.null(model)) {
+        model <- tryCatch(
+          MASS::glm.nb(formula_simple, data = df, control = glm.control(maxit = 200)),
+          error = function(e) {
+            return(NULL)
+          }
+        )
+        if (is.null(model)) {
+          model <- glm(formula_simple, family = poisson(link = "log"), data = df)
+          model_type <- "Poisson"
+        } else {
+          model_type <- "Negative Binomial"
+        }
+      }
+
+      tidy_result <- .tidy_count_model(model) %>%
+        dplyr::mutate(
+          `rate ratio` = exp(estimate),
+          var.diag = std.error^2,
+          `std.error (rate ratio)` = ifelse(var.diag >= 0,
+                                            sqrt(`rate ratio`^2 * var.diag),
+                                            NA),
+          model_type = model_type
+        )
+
+      return(tidy_result)
+    }) %>%
+    ungroup() %>%
+    dplyr::select(word, model_type, term, estimate, std.error,
+                  `rate ratio`, `std.error (rate ratio)`, statistic, p.value) %>%
+    rename(
+      `log(rate ratio)` = estimate,
+      `z-statistic` = statistic
+    )
+
+
+  significance_results_tables <- significance_results %>%
+    mutate(word = factor(word, levels = selected_terms)) %>%
+    arrange(word) %>%
+    group_by(word) %>%
+    group_map(~ {
+      htmltools::tagList(
+        htmltools::tags$div(
+          style = "margin-bottom: 20px;",
+          htmltools::tags$p(
+            .y$word,
+            style = "font-weight: bold; text-align: center; font-size: 11pt;"
+          )
+        ),
+        .x %>%
+          mutate_if(is.numeric, ~ round(., 3)) %>%
+          DT::datatable(
+            rownames = FALSE,
+            extensions = "Buttons",
+            options = list(
+              scrollX = TRUE,
+              width = "80%",
+              dom = "Bfrtip",
+              buttons = c("copy", "csv", "excel", "pdf", "print")
+            )
+          ) %>%
+          DT::formatStyle(
+            columns = names(.x),
+            `font-size` = "16px"
+          )
+      )
+    })
+
+  list(
+    plot = con_var_term_plot,
+    table = htmltools::tagList(significance_results_tables) %>% htmltools::browsable()
+  )
+}
+
+
+#' @title Calculate Similarity Metrics
+#'
+#' @description
+#' Calculates similarity metrics including statistical measures
+#' and network properties.
+#' Internal function used by document_similarity_analysis.
+#'
+#' @param similarity_matrix A similarity matrix.
+#' @param labels Optional vector of labels for clustering metrics.
+#' @param method_info Optional method information.
+#'
+#' @return A list of metrics.
+#'
+#' @keywords internal
+calculate_metrics <- function(similarity_matrix, labels = NULL, method_info = NULL) {
+  off_diagonal <- similarity_matrix[upper.tri(similarity_matrix) | lower.tri(similarity_matrix)]
+
+  metrics <- list(
+    n_docs = nrow(similarity_matrix),
+    mean_similarity = round(mean(off_diagonal, na.rm = TRUE), 4),
+    median_similarity = round(median(off_diagonal, na.rm = TRUE), 4),
+    std_similarity = round(sd(off_diagonal, na.rm = TRUE), 4),
+    min_similarity = round(min(off_diagonal, na.rm = TRUE), 4),
+    max_similarity = round(max(off_diagonal, na.rm = TRUE), 4),
+    similarity_range = paste(round(min(off_diagonal, na.rm = TRUE), 3), "to",
+                             round(max(off_diagonal, na.rm = TRUE), 3)),
+    sparsity = round(sum(off_diagonal < 0.1, na.rm = TRUE) / length(off_diagonal), 4),
+    connectivity = round(sum(off_diagonal > 0.3, na.rm = TRUE) / length(off_diagonal), 4),
+    skewness = ifelse(requireNamespace("moments", quietly = TRUE),
+                     round(moments::skewness(off_diagonal, na.rm = TRUE), 4), NA),
+    kurtosis = ifelse(requireNamespace("moments", quietly = TRUE),
+                     round(moments::kurtosis(off_diagonal, na.rm = TRUE), 4), NA),
+    silhouette_score = NA,
+    modularity = NA
+  )
+
+  if (!is.null(labels) && is.atomic(labels) && is.vector(labels) &&
+      length(labels) > 0 && length(unique(labels)) > 1 &&
+      length(unique(labels)) < length(labels) * 0.8) {
+
+    tryCatch({
+      if (requireNamespace("cluster", quietly = TRUE)) {
+        dist_matrix <- as.dist(1 - similarity_matrix)
+        sil_result <- cluster::silhouette(as.numeric(as.factor(labels)), dist_matrix)
+        metrics$silhouette_score <- if (is.numeric(sil_result[, 3]) && !is.na(sil_result[, 3]))
+                                   round(mean(sil_result[, 3]), 3) else NA
+      }
+    }, error = function(e) {
+      metrics$silhouette_score <- NA
+    })
+
+    tryCatch({
+      if (requireNamespace("igraph", quietly = TRUE)) {
+        threshold <- quantile(similarity_matrix[upper.tri(similarity_matrix)], 0.75, na.rm = TRUE)
+        adj_matrix <- similarity_matrix > threshold
+        diag(adj_matrix) <- FALSE
+        graph <- igraph::graph_from_adjacency_matrix(adj_matrix, mode = "undirected")
+        communities <- igraph::cluster_louvain(graph)
+        metrics$modularity <- if (is.numeric(igraph::modularity(communities)) &&
+                                  !is.na(igraph::modularity(communities)))
+                             round(igraph::modularity(communities), 3) else NA
+      }
+    }, error = function(e) {
+      metrics$modularity <- NA
+    })
+  }
+
+
+  if (!is.null(method_info)) {
+    metrics$method <- method_info$method
+    metrics$model_name <- method_info$model_name %||% "N/A"
+  }
+
+  return(metrics)
+}
+
+
+# Python environment setup and utilities
+
+#' Setup Python Environment
+#'
+#' @description
+#' Sets up a tiered Python virtual environment.
+#'
+#' @param envname Character string name for the virtual environment
+#'   (default: "textanalysisr-env")
+#' @param tier Which feature tier to install. One or more of:
+#'   `"core"` (spacy + pdfplumber, ~200 MB; default),
+#'   `"embeddings"` (adds sentence-transformers + transformers + torch, ~1 GB),
+#'   `"topics"` (adds BERTopic + UMAP + HDBSCAN, ~300 MB on top of embeddings).
+#' @param force Logical, whether to recreate environment if it exists
+#'   (default: FALSE)
+#'
+#' @return Invisible TRUE if successful, stops with error message if failed
+#'
+#' @details
+#' Default `tier = "core"` keeps the install light -- spaCy NLP and PDF text
+#' extraction only. Add `"embeddings"` for sentence-transformers-based
+#' similarity/sentiment, and `"topics"` for BERTopic.
+#'
+#' The virtual environment is isolated; system Python is not modified.
+#'
+#' @export
+#'
+#' @examples
+#' if (interactive()) {
+#'   setup_python_env()                              # core only (~200 MB)
+#'   setup_python_env(tier = c("core", "embeddings"))  # +1 GB
+#'   setup_python_env(tier = c("core", "embeddings", "topics"))  # full stack
+#' }
+setup_python_env <- function(envname = "textanalysisr-env",
+                             tier = "core",
+                             force = FALSE) {
+  tier <- match.arg(tier, c("core", "embeddings", "topics"), several.ok = TRUE)
+  if (!"core" %in% tier) tier <- c("core", tier)
+  if (!requireNamespace("reticulate", quietly = TRUE)) {
+    return(.notify_missing_python("Python environment setup"))
+  }
+
+  env_exists <- tryCatch(
+    envname %in% reticulate::virtualenv_list(),
+    error = function(e) FALSE
+  )
+
+  if (!interactive() && !env_exists) {
+    message("setup_python_env() skipped: non-interactive session and ",
+            "virtualenv '", envname, "' not found. ",
+            "Run in an interactive R session to create it.")
+    return(invisible(FALSE))
+  }
+
+  message("\nPython Environment Setup")
+
+
+  # Check if Python is available
+  python_available <- tryCatch({
+    py_config <- reticulate::py_discover_config()
+    !is.null(py_config$python)
+  }, error = function(e) FALSE)
+
+  if (!python_available) {
+    if (!interactive()) {
+      message("Python not found. Install Python (e.g. from python.org) and rerun ",
+              "setup_python_env() in an interactive R session.")
+      return(invisible(FALSE))
+    }
+    message("No Python found. Install Miniconda? (y/n): ")
+    response <- readline(prompt = "")
+
+    if (tolower(trimws(response)) == "y") {
+      message("Installing Miniconda...")
+      reticulate::install_miniconda()
+      message("Done.")
+    } else {
+      message("Python required. Install from python.org and retry.")
+      return(invisible(FALSE))
+    }
+  } else {
+    py_info <- reticulate::py_discover_config()
+    message("Python: ", py_info$python, " (v", py_info$version, ")")
+  }
+
+  tryCatch({
+    env_exists <- envname %in% reticulate::virtualenv_list()
+
+    if (env_exists && !force) {
+      message("Environment '", envname, "' exists. Use force=TRUE to recreate.")
+      reticulate::use_virtualenv(envname, required = TRUE)
+      return(invisible(TRUE))
+    }
+
+    if (env_exists && force) {
+      message("Removing existing environment...")
+      reticulate::virtualenv_remove(envname, confirm = FALSE)
+    }
+
+    message("Creating environment '", envname, "'...")
+    reticulate::virtualenv_create(envname, python = NULL)
+    reticulate::use_virtualenv(envname, required = TRUE)
+
+    tier_files <- paste0("requirements-", tier, ".txt")
+    req_packages <- unlist(lapply(tier_files, function(f) {
+      path <- system.file("python", f, package = "TextAnalysisR")
+      if (!nzchar(path) || !file.exists(path)) return(character(0))
+      lines <- readLines(path)
+      lines[!grepl("^#|^\\s*$", lines)]
+    }))
+
+    if (length(req_packages) == 0) {
+      req_packages <- c("spacy>=3.5.0", "pdfplumber>=0.10.0")
+    }
+
+    message("Installing packages for tier(s): ", paste(tier, collapse = ", "))
+    reticulate::virtualenv_install(envname = envname, packages = req_packages, ignore_installed = FALSE)
+
+    message("Testing imports...")
+    test_result <- tryCatch({
+      reticulate::py_run_string("import spacy")
+      reticulate::py_run_string("import pdfplumber")
+      TRUE
+    }, error = function(e) {
+      message("Import failed: ", e$message)
+      FALSE
+    })
+
+    if (!test_result) {
+      message("Package imports failed. Check Python logs.")
+      return(invisible(FALSE))
+    }
+
+    # Download spaCy English model
+    message("Downloading spaCy English model (en_core_web_sm)...")
+    spacy_model_result <- tryCatch({
+      reticulate::py_run_string("
+import spacy
+try:
+    nlp = spacy.load('en_core_web_sm')
+    print('Model already installed')
+except OSError:
+    print('Downloading model...')
+    spacy.cli.download('en_core_web_sm')
+    print('Model downloaded')
+")
+      TRUE
+    }, error = function(e) {
+      message("Note: spaCy model download failed: ", e$message)
+      message("You can install manually: python -m spacy download en_core_web_sm")
+      FALSE
+    })
+
+    message("\nSetup complete!")
+    if (spacy_model_result) {
+      message("- spaCy model: en_core_web_sm installed")
+    }
+    message("Restart R session to activate.")
+    return(invisible(TRUE))
+
+  }, error = function(e) {
+    message("Failed to set up Python environment: ", e$message)
+    invisible(FALSE)
+  })
+}
+
+
+#' Check Python Environment Status
+#'
+#' @description
+#' Checks if Python environment is available and properly configured.
+#'
+#' @param envname Character string name of the virtual environment
+#'   (default: "textanalysisr-env")
+#'
+#' @return List with status information:
+#'   - available: Logical, TRUE if environment exists
+#'   - active: Logical, TRUE if environment is currently active
+#'   - packages: List of installed package versions
+#'
+#' @keywords internal
+#' @export
+#'
+#' @examples
+#' if (interactive()) {
+#' status <- check_python_env()
+#' print(status)
+#' }
+check_python_env <- function(envname = "textanalysisr-env") {
+  if (!requireNamespace("reticulate", quietly = TRUE)) {
+    message("Package 'reticulate' is required. Install with install.packages('reticulate').")
+    return(list(available = FALSE, active = FALSE, packages = list()))
+  }
+
+  env_list <- reticulate::virtualenv_list()
+  available <- envname %in% env_list
+
+  if (!available) {
+    return(list(
+      available = FALSE,
+      active = FALSE,
+      packages = NULL,
+      message = paste("Environment", envname, "not found. Run setup_python_env() to create it.")
+    ))
+  }
+
+  tryCatch({
+    reticulate::use_virtualenv(envname, required = TRUE)
+
+    packages <- tryCatch({
+      spacy_version <- reticulate::py_run_string("import spacy; print(spacy.__version__)")
+      pdfplumber_check <- reticulate::py_run_string("import pdfplumber; print(pdfplumber.__version__)")
+
+      list(
+        spacy = spacy_version,
+        pdfplumber = pdfplumber_check
+      )
+    }, error = function(e) NULL)
+
+    return(list(
+      available = TRUE,
+      active = TRUE,
+      packages = packages,
+      message = "Python environment is ready"
+    ))
+
+  }, error = function(e) {
+    return(list(
+      available = TRUE,
+      active = FALSE,
+      packages = NULL,
+      message = paste("Failed to activate environment:", e$message)
+    ))
+  })
+}
+
+
+
+
+# Cloud LLM API utilities (OpenAI, Gemini)
+
+#' Call OpenAI Chat Completion API
+#'
+#' @description
+#' Makes a chat completion request to OpenAI's API.
+#'
+#' @param system_prompt Character string with system instructions
+#' @param user_prompt Character string with user message
+#' @param model Character string specifying the model (default: "gpt-4.1-mini")
+#' @param temperature Numeric temperature for response randomness (default: 0)
+#' @param max_tokens Maximum number of tokens to generate (default: 150)
+#' @param api_key Character string with OpenAI API key
+#'
+#' @return Character string with the model's response
+#'
+#' @concept ai
+#' @keywords internal
+#'
+call_openai_chat <- function(system_prompt,
+                              user_prompt,
+                              model = "gpt-4.1-mini",
+                              temperature = 0,
+                              max_tokens = 150,
+                              api_key) {
+
+  if (!requireNamespace("httr", quietly = TRUE)) {
+    stop("httr package is required for OpenAI API calls")
+  }
+  if (!requireNamespace("jsonlite", quietly = TRUE)) {
+    stop("jsonlite package is required for OpenAI API calls")
+  }
+
+  body_list <- list(
+    model = model,
+    messages = list(
+      list(role = "system", content = system_prompt),
+      list(role = "user", content = user_prompt)
+    ),
+    temperature = temperature,
+    max_tokens = max_tokens
+  )
+
+  response <- httr::POST(
+    url = "https://api.openai.com/v1/chat/completions",
+    httr::add_headers(
+      `Authorization` = paste("Bearer", api_key)
+    ),
+    body = body_list,
+    encode = "json"
+  )
+
+  if (httr::status_code(response) != 200) {
+    .stop_api_error("openai", "chat", httr::status_code(response),
+                    httr::content(response, "text", encoding = "UTF-8"))
+  }
+
+  res_json <- jsonlite::fromJSON(httr::content(response, "text", encoding = "UTF-8"))
+
+  if (!is.null(res_json$choices) && length(res_json$choices) > 0) {
+    return(res_json$choices$message$content[1])
+  }
+
+  stop("Unexpected response structure from OpenAI API")
+}
+
+
+#' Call Gemini Chat API
+#'
+#' @description
+#' Makes a chat completion request to Google's Gemini API.
+#'
+#' @param system_prompt Character string with system instructions
+#' @param user_prompt Character string with user message
+#' @param model Character string specifying the Gemini model (default: "gemini-2.5-flash")
+#' @param temperature Numeric temperature for response randomness (default: 0)
+#' @param max_tokens Maximum number of tokens to generate (default: 150)
+#' @param api_key Character string with Gemini API key
+#'
+#' @return Character string with the model's response
+#'
+#' @concept ai
+#' @keywords internal
+#'
+call_gemini_chat <- function(system_prompt,
+                              user_prompt,
+                              model = "gemini-2.5-flash",
+                              temperature = 0,
+                              max_tokens = 8192,
+                              api_key) {
+
+  if (!requireNamespace("httr", quietly = TRUE)) {
+    stop("httr package is required for Gemini API calls")
+  }
+  if (!requireNamespace("jsonlite", quietly = TRUE)) {
+    stop("jsonlite package is required for Gemini API calls")
+  }
+
+  body_list <- list(
+    systemInstruction = list(
+      parts = list(
+        list(text = system_prompt)
+      )
+    ),
+    contents = list(
+      list(
+        role = "user",
+        parts = list(
+          list(text = user_prompt)
+        )
+      )
+    ),
+    generationConfig = list(
+      temperature = temperature,
+      maxOutputTokens = max_tokens,
+      thinkingConfig = list(
+        thinkingBudget = 1024
+      )
+    )
+  )
+
+  url <- paste0(
+    "https://generativelanguage.googleapis.com/v1beta/models/",
+    model, ":generateContent"
+  )
+
+  response <- httr::POST(
+    url = url,
+    httr::add_headers(
+      `x-goog-api-key` = api_key
+    ),
+    body = body_list,
+    encode = "json"
+  )
+
+  if (httr::status_code(response) != 200) {
+    .stop_api_error("gemini", "chat", httr::status_code(response),
+                    httr::content(response, "text", encoding = "UTF-8"))
+  }
+
+  res_json <- jsonlite::fromJSON(
+    httr::content(response, "text", encoding = "UTF-8"),
+    simplifyVector = FALSE
+  )
+
+  if (!is.null(res_json$candidates) && length(res_json$candidates) > 0) {
+    parts <- res_json$candidates[[1]]$content$parts
+    if (!is.null(parts) && length(parts) > 0) {
+      answer_texts <- character(0)
+      for (part in parts) {
+        if (isTRUE(part$thought)) next
+        if (!is.null(part$text) && nzchar(part$text)) {
+          answer_texts <- c(answer_texts, part$text)
+        }
+      }
+      if (length(answer_texts) > 0) {
+        return(paste(answer_texts, collapse = "\n"))
+      }
+      return(parts[[length(parts)]]$text)
+    }
+  }
+
+  stop("Unexpected response structure from Gemini API")
+}
+
+
+#' Call LLM API (Unified Wrapper)
+#'
+#' @description
+#' Unified wrapper for calling different LLM providers (OpenAI, Gemini).
+#' Automatically routes to the appropriate provider-specific function.
+#'
+#' @param provider Character string: "openai" or "gemini"
+#' @param system_prompt Character string with system instructions
+#' @param user_prompt Character string with user message
+#' @param model Character string specifying the model (provider-specific defaults apply)
+#' @param temperature Numeric temperature for response randomness (default: 0)
+#' @param max_tokens Maximum number of tokens to generate (default: 150)
+#' @param api_key Character string with API key (required for openai/gemini)
+#'
+#' @return Character string with the model's response
+#'
+#' @concept ai
+#' @seealso [sanitize_llm_input()] to clean text before prompting; [get_best_embeddings()] for vector embeddings; [run_rag_search()] for RAG search (retrieval + generation)
+#' @export
+#'
+#' @examples
+#' if (interactive()) {
+#' # Using OpenAI
+#' response <- call_llm_api(
+#'   provider = "openai",
+#'   system_prompt = "You are a helpful assistant.",
+#'   user_prompt = "Generate a topic label",
+#'   api_key = Sys.getenv("OPENAI_API_KEY")
+#' )
+#'
+#' # Using Gemini
+#' response <- call_llm_api(
+#'   provider = "gemini",
+#'   system_prompt = "You are a helpful assistant.",
+#'   user_prompt = "Generate a topic label",
+#'   api_key = Sys.getenv("GEMINI_API_KEY")
+#' )
+#' }
+call_llm_api <- function(provider = c("openai", "gemini"),
+                         system_prompt,
+                         user_prompt,
+                         model = NULL,
+                         temperature = 0,
+                         max_tokens = 150,
+                         api_key = NULL) {
+
+  provider <- match.arg(provider)
+
+  # Set default models based on provider
+  if (is.null(model)) {
+    model <- switch(provider,
+      "openai" = "gpt-4.1-mini",
+      "gemini" = "gemini-2.5-flash"
+    )
+  }
+
+  if (is.null(api_key) || !nzchar(api_key)) {
+    api_key <- switch(provider,
+      "openai" = Sys.getenv("OPENAI_API_KEY"),
+      "gemini" = Sys.getenv("GEMINI_API_KEY")
+    )
+  }
+
+  if (!nzchar(api_key)) {
+    return(.notify_missing_api_key(provider))
+  }
+
+  result <- switch(provider,
+    "openai" = call_openai_chat(
+      system_prompt = system_prompt,
+      user_prompt = user_prompt,
+      model = model,
+      temperature = temperature,
+      max_tokens = max_tokens,
+      api_key = api_key
+    ),
+    "gemini" = call_gemini_chat(
+      system_prompt = system_prompt,
+      user_prompt = user_prompt,
+      model = model,
+      temperature = temperature,
+      max_tokens = max_tokens,
+      api_key = api_key
+    )
+  )
+
+  return(result)
+}
+
+
+#' Describe Image with OpenAI Vision API
+#'
+#' @param image_base64 Character string of base64-encoded PNG image
+#' @param prompt Character string describing what to extract
+#' @param model Character string, OpenAI model name (default: "gpt-4.1")
+#' @param max_tokens Integer, maximum tokens in response (default: 500)
+#' @param api_key Character string, OpenAI API key
+#'
+#' @return Character string description, or NULL on failure
+#' @keywords internal
+describe_image_openai <- function(image_base64,
+                                  prompt = "Describe this image: charts, diagrams, tables, and text. Extract visible text.",
+                                  model = "gpt-4.1",
+                                  max_tokens = 500,
+                                  api_key) {
+  if (!requireNamespace("httr", quietly = TRUE) ||
+      !requireNamespace("jsonlite", quietly = TRUE)) {
+    return(NULL)
+  }
+
+  tryCatch({
+    body <- list(
+      model = model,
+      messages = list(
+        list(
+          role = "user",
+          content = list(
+            list(type = "text", text = prompt),
+            list(
+              type = "image_url",
+              image_url = list(
+                url = paste0("data:image/png;base64,", image_base64)
+              )
+            )
+          )
+        )
+      ),
+      max_tokens = max_tokens
+    )
+
+    response <- httr::POST(
+      url = "https://api.openai.com/v1/chat/completions",
+      httr::add_headers(
+        Authorization = paste("Bearer", api_key),
+        `Content-Type` = "application/json"
+      ),
+      body = jsonlite::toJSON(body, auto_unbox = TRUE),
+      httr::timeout(120)
+    )
+
+    status <- httr::status_code(response)
+    if (status != 200) {
+      resp_text <- tryCatch(httr::content(response, "text", encoding = "UTF-8"), error = function(e) "")
+      message(.format_api_error_message("openai", "vision", status, resp_text))
+      return(NULL)
+    }
+
+    res_json <- jsonlite::fromJSON(httr::content(response, "text", encoding = "UTF-8"))
+    result <- res_json$choices$message$content[[1]]
+    if (is.null(result) || !nzchar(trimws(result))) return(NULL)
+    return(trimws(result))
+  }, error = function(e) {
+    message("[Vision OpenAI] Error: ", e$message)
+    NULL
+  })
+}
+
+
+#' Describe Image with Gemini Vision API
+#'
+#' @param image_base64 Character string of base64-encoded PNG image
+#' @param prompt Character string describing what to extract
+#' @param model Character string, Gemini model name (default: "gemini-2.5-flash")
+#' @param max_tokens Integer, maximum tokens in response (default: 500)
+#' @param api_key Character string, Gemini API key
+#'
+#' @return Character string description, or NULL on failure
+#' @keywords internal
+describe_image_gemini <- function(image_base64,
+                                  prompt = "Describe this image: charts, diagrams, tables, and text. Extract visible text.",
+                                  model = "gemini-2.5-flash",
+                                  max_tokens = 500,
+                                  api_key) {
+  if (!requireNamespace("httr", quietly = TRUE) ||
+      !requireNamespace("jsonlite", quietly = TRUE)) {
+    return(NULL)
+  }
+
+  tryCatch({
+    body <- list(
+      contents = list(
+        list(
+          parts = list(
+            list(text = prompt),
+            list(
+              inline_data = list(
+                mime_type = "image/png",
+                data = image_base64
+              )
+            )
+          )
+        )
+      ),
+      generationConfig = list(
+        maxOutputTokens = max_tokens
+      )
+    )
+
+    url <- paste0(
+      "https://generativelanguage.googleapis.com/v1beta/models/",
+      model, ":generateContent"
+    )
+
+    response <- httr::POST(
+      url = url,
+      httr::add_headers(
+        `Content-Type` = "application/json",
+        `x-goog-api-key` = api_key
+      ),
+      body = jsonlite::toJSON(body, auto_unbox = TRUE),
+      httr::timeout(120)
+    )
+
+    status <- httr::status_code(response)
+    if (status != 200) {
+      resp_text <- tryCatch(httr::content(response, "text", encoding = "UTF-8"), error = function(e) "")
+      message(.format_api_error_message("gemini", "vision", status, resp_text))
+      return(NULL)
+    }
+
+    res_json <- jsonlite::fromJSON(httr::content(response, "text", encoding = "UTF-8"))
+
+    if (!is.null(res_json$candidates) && length(res_json$candidates) > 0) {
+      parts <- tryCatch({
+        if (is.data.frame(res_json$candidates)) {
+          res_json$candidates$content$parts[[1]]
+        } else {
+          res_json$candidates[[1]]$content$parts
+        }
+      }, error = function(e) NULL)
+
+      if (!is.null(parts) && length(parts) > 0) {
+        result <- if (is.data.frame(parts)) parts$text[1] else parts[[1]]$text
+        if (!is.null(result) && nzchar(trimws(result))) return(trimws(result))
+      }
+    }
+    return(NULL)
+  }, error = function(e) {
+    message("[Vision Gemini] Error: ", e$message)
+    NULL
+  })
+}
+
+
+#' Describe Image Using Vision LLM
+#'
+#' @description
+#' Unified dispatcher for image description using vision LLMs.
+#' Routes to the appropriate provider (OpenAI or Gemini).
+#'
+#' @param image_base64 Character string of base64-encoded PNG image
+#' @param provider Character: "openai" or "gemini"
+#' @param model Character: Model name (uses provider default if NULL)
+#' @param api_key Character: API key (required for openai/gemini)
+#' @param prompt Character: Description prompt
+#' @param timeout Numeric: Request timeout in seconds (default: 120)
+#'
+#' @return Character string description, or NULL on failure
+#'
+#' @concept ai
+#' @export
+describe_image <- function(image_base64,
+                           provider = "gemini",
+                           model = NULL,
+                           api_key = NULL,
+                           prompt = "Describe this image: charts, diagrams, tables, and text. Extract visible text.",
+                           timeout = 120) {
+  if (is.null(model)) {
+    model <- switch(provider,
+      "openai" = "gpt-4.1",
+      "gemini" = "gemini-2.5-flash",
+      "gemini-2.5-flash"
+    )
+  }
+
+  switch(provider,
+    "openai" = describe_image_openai(image_base64, prompt, model, api_key = api_key),
+    "gemini" = describe_image_gemini(image_base64, prompt, model, api_key = api_key),
+    NULL
+  )
+}
+
+
+#' Get Embeddings from API
+#'
+#' @description
+#' Generates text embeddings using OpenAI or Gemini embedding APIs.
+#'
+#' @param texts Character vector of texts to embed
+#' @param provider Character string: "openai" or "gemini"
+#' @param model Character string specifying the embedding model. Defaults:
+#'   - openai: "text-embedding-3-small"
+#'   - gemini: "gemini-embedding-001"
+#' @param api_key Character string with API key
+#' @param batch_size Integer, number of texts to embed per API call (default: 100)
+#'
+#' @return Matrix with embeddings (rows = texts, columns = dimensions)
+#'
+#' @concept ai
+#' @keywords internal
+#'
+get_api_embeddings <- function(texts,
+                           provider = c("openai", "gemini"),
+                           model = NULL,
+                           api_key = NULL,
+                           batch_size = 100) {
+
+  provider <- match.arg(provider)
+
+  if (is.null(model)) {
+    model <- switch(provider,
+      "openai" = "text-embedding-3-small",
+      "gemini" = "gemini-embedding-001"
+    )
+  }
+
+  if (is.null(api_key) || !nzchar(api_key)) {
+    api_key <- switch(provider,
+      "openai" = Sys.getenv("OPENAI_API_KEY"),
+      "gemini" = Sys.getenv("GEMINI_API_KEY")
+    )
+  }
+
+  if (!nzchar(api_key)) {
+    return(.notify_missing_api_key(provider))
+  }
+
+  if (!requireNamespace("httr", quietly = TRUE)) {
+    stop("httr package is required for embedding API calls")
+  }
+  if (!requireNamespace("jsonlite", quietly = TRUE)) {
+    stop("jsonlite package is required for embedding API calls")
+  }
+
+  n_texts <- length(texts)
+  all_embeddings <- list()
+
+  for (start in seq(1, n_texts, by = batch_size)) {
+    end <- min(start + batch_size - 1, n_texts)
+    batch_texts <- texts[start:end]
+
+    embeddings <- switch(provider,
+      "openai" = get_openai_embeddings(batch_texts, model, api_key),
+      "gemini" = get_gemini_embeddings(batch_texts, model, api_key)
+    )
+
+    all_embeddings[[length(all_embeddings) + 1]] <- embeddings
+  }
+
+  do.call(rbind, all_embeddings)
+}
+
+
+#' Get OpenAI Embeddings (Internal)
+#' @keywords internal
+get_openai_embeddings <- function(texts, model, api_key) {
+  body_list <- list(
+    input = texts,
+    model = model
+  )
+
+  response <- httr::POST(
+    url = "https://api.openai.com/v1/embeddings",
+    httr::add_headers(
+      `Content-Type` = "application/json",
+      `Authorization` = paste("Bearer", api_key)
+    ),
+    body = jsonlite::toJSON(body_list, auto_unbox = TRUE),
+    encode = "json"
+  )
+
+  if (httr::status_code(response) != 200) {
+    .stop_api_error("openai", "embeddings", httr::status_code(response),
+                    httr::content(response, "text", encoding = "UTF-8"))
+  }
+
+  res_json <- jsonlite::fromJSON(httr::content(response, "text", encoding = "UTF-8"))
+
+  if (!is.null(res_json$data)) {
+    # Sort by index to ensure correct order
+    embeddings <- res_json$data[order(res_json$data$index), ]
+    do.call(rbind, embeddings$embedding)
+  } else {
+    stop("Unexpected response structure from OpenAI Embeddings API")
+  }
+}
+
+
+#' Get Gemini Embeddings (Internal)
+#' @keywords internal
+get_gemini_embeddings <- function(texts, model, api_key) {
+  # Gemini requires individual requests per text
+  embeddings_list <- lapply(texts, function(text) {
+    body_list <- list(
+      model = paste0("models/", model),
+      content = list(
+        parts = list(
+          list(text = text)
+        )
+      )
+    )
+
+    url <- paste0(
+      "https://generativelanguage.googleapis.com/v1beta/models/",
+      model, ":embedContent"
+    )
+
+    response <- httr::POST(
+      url = url,
+      httr::add_headers(
+        `Content-Type` = "application/json",
+        `x-goog-api-key` = api_key
+      ),
+      body = jsonlite::toJSON(body_list, auto_unbox = TRUE),
+      encode = "json"
+    )
+
+    if (httr::status_code(response) != 200) {
+      .stop_api_error("gemini", "embeddings", httr::status_code(response),
+                      httr::content(response, "text", encoding = "UTF-8"))
+    }
+
+    res_json <- jsonlite::fromJSON(httr::content(response, "text", encoding = "UTF-8"))
+
+    if (!is.null(res_json$embedding$values)) {
+      return(res_json$embedding$values)
+    } else {
+      stop("Unexpected response structure from Gemini Embeddings API")
+    }
+  })
+
+  do.call(rbind, embeddings_list)
+}
+
+
+#' Get Best Available Embeddings
+#'
+#' @description
+#' Auto-detects and uses the best available embedding provider with the following priority:
+#' 1. sentence-transformers (local Python) - if Python environment is set up
+#' 2. OpenAI API - if OPENAI_API_KEY is set
+#' 3. Gemini API - if GEMINI_API_KEY is set
+#'
+#' @param texts Character vector of texts to embed
+#' @param provider Character string: "auto" (default), "sentence-transformers",
+#'   "openai", or "gemini". Use "auto" for automatic detection.
+#' @param model Character string specifying the embedding model. If NULL, uses default
+#'   model for the selected provider.
+#' @param api_key Optional API key for OpenAI or Gemini providers. If NULL, falls back
+#'   to environment variables (OPENAI_API_KEY, GEMINI_API_KEY).
+#' @param verbose Logical, whether to print progress messages (default: TRUE)
+#'
+#' @return Matrix with embeddings (rows = texts, columns = dimensions)
+#'
+#' @concept ai
+#' @export
+#'
+#' @examples
+#' if (interactive()) {
+#' data(SpecialEduTech)
+#' texts <- SpecialEduTech$abstract[1:5]
+#'
+#' # Auto-detect best available provider
+#' embeddings <- get_best_embeddings(texts)
+#'
+#' # Force specific provider
+#' embeddings <- get_best_embeddings(texts, provider = "openai")
+#'
+#' dim(embeddings)
+#' }
+get_best_embeddings <- function(texts,
+                                 provider = "auto",
+                                 model = NULL,
+                                 api_key = NULL,
+                                 verbose = TRUE) {
+
+  if (!is.character(texts) || length(texts) == 0) {
+    stop("texts must be a non-empty character vector")
+  }
+
+  if (provider == "auto") {
+    if (check_feature("python")) {
+      provider <- "sentence-transformers"
+      if (verbose) message("Using sentence-transformers embeddings (local Python)")
+    } else if ((!is.null(api_key) && nzchar(api_key)) || nzchar(Sys.getenv("OPENAI_API_KEY"))) {
+      provider <- "openai"
+      if (verbose) message("Using OpenAI embeddings (API)")
+    } else if (nzchar(Sys.getenv("GEMINI_API_KEY"))) {
+      provider <- "gemini"
+      if (verbose) message("Using Gemini embeddings (API)")
+    } else {
+      message(
+        "No embedding provider available. Options:\n",
+        "  1. Set up Python with: TextAnalysisR::setup_python_env()\n",
+        "  2. Set OPENAI_API_KEY or GEMINI_API_KEY environment variable"
+      )
+      return(invisible(NULL))
+    }
+  }
+
+  embeddings <- switch(provider,
+    "sentence-transformers" = {
+      if (!check_feature("python")) {
+        return(.notify_missing_python("Embedding generation via sentence-transformers"))
+      }
+      model <- model %||% "all-MiniLM-L6-v2"
+      generate_embeddings(texts, model = model, verbose = verbose)
+    },
+    "openai" = {
+      model <- model %||% "text-embedding-3-small"
+      get_api_embeddings(texts, provider = "openai", model = model, api_key = api_key)
+    },
+    "gemini" = {
+      model <- model %||% "gemini-embedding-001"
+      get_api_embeddings(texts, provider = "gemini", model = model, api_key = api_key)
+    },
+    stop(paste0(
+      "Unknown provider: ", provider, ". ",
+      "Valid options: auto, sentence-transformers, openai, gemini"
+    ))
+  )
+
+  embeddings
+}
+
+
+# Security and validation utilities
+
+#' Cybersecurity Utility Functions
+#'
+#' @description Functions for input validation, sanitization, and security logging
+#'
+#' @section NIST Compliance:
+#' This package follows NIST security standards (based on NIST SP 800-53):
+#' - SC-8: Transmission Confidentiality and Integrity (HTTPS encryption)
+#' - SC-28: Protection of Information at Rest (secure API key storage)
+#' - IA-5: Authenticator Management (API key validation and format checking)
+#' - AC-3: Access Enforcement (rate limiting, input validation, file type restrictions)
+#' - SI-10: Information Input Validation (malicious content detection)
+#' - AU-2: Audit Events (security logging and monitoring)
+
+#' Validate File Upload
+#'
+#' @param file_info File info object from Shiny fileInput
+#' @return TRUE if valid, stops with error message if invalid
+#' @keywords internal
+validate_file_upload <- function(file_info) {
+  if (is.null(file_info)) {
+    stop("No file provided")
+  }
+
+  allowed_extensions <- c(".csv", ".xlsx", ".txt", ".rds", ".pdf", ".docx")
+  ext <- tools::file_ext(file_info$name)
+
+  if (!paste0(".", tolower(ext)) %in% allowed_extensions) {
+    stop("Invalid file type. Allowed types: CSV, XLSX, TXT, RDS, PDF, DOCX")
+  }
+
+  max_size <- 50 * 1024 * 1024
+  if (file_info$size > max_size) {
+    stop("File size exceeds maximum limit of 50MB")
+  }
+
+  if (ext %in% c("csv", "txt")) {
+    content <- tryCatch({
+      suppressWarnings(readLines(file_info$datapath, n = 10, warn = FALSE))
+    }, error = function(e) {
+      stop("Unable to read file contents")
+    })
+
+    suspicious_patterns <- c("<script", "javascript:", "onerror=", "onclick=")
+    if (any(grepl(paste(suspicious_patterns, collapse = "|"), content, ignore.case = TRUE))) {
+      stop("File contains potentially malicious content")
+    }
+  }
+
+  return(TRUE)
+}
+
+#' Sanitize Text Input
+#'
+#' @param text Text input from user
+#' @return Sanitized text
+#' @keywords internal
+sanitize_text_input <- function(text) {
+  if (is.null(text) || nchar(text) == 0) {
+    return(text)
+  }
+
+  text <- gsub("<script.*?>.*?</script>", "", text, ignore.case = TRUE)
+  text <- gsub("javascript:", "", text, ignore.case = TRUE)
+  text <- gsub("on\\w+\\s*=", "", text, ignore.case = TRUE)
+
+  max_chars <- 1000000
+  if (nchar(text) > max_chars) {
+    stop("Text input exceeds maximum length of 1 million characters")
+  }
+
+  return(text)
+}
+
+#' Sanitize LLM Input
+#'
+#' @description
+#' Sanitizes user input before inclusion in LLM prompts to mitigate prompt
+#' injection attacks. Filters common injection patterns such as instruction
+#' overrides, system prompt markers, and role-switching attempts.
+#' Distinct from \code{sanitize_text_input()} which targets XSS.
+#'
+#' @param text Character string of user input destined for an LLM prompt
+#' @param max_length Maximum allowed character length (default: 2000)
+#' @return Sanitized character string
+#'
+#' @section NIST Compliance:
+#' Implements NIST SI-10 (Information Input Validation) for AI/LLM contexts.
+#'
+#' @keywords internal
+sanitize_llm_input <- function(text, max_length = 2000) {
+  if (is.null(text) || !is.character(text) || !nzchar(text)) {
+    return(text)
+  }
+
+  if (nchar(text) > max_length) {
+    text <- substr(text, 1, max_length)
+  }
+
+  injection_patterns <- c(
+    "ignore (all |any )?previous instructions",
+    "ignore (all |any )?prior instructions",
+    "disregard (all |any )?previous",
+    "forget (all |any )?previous",
+    "you are now",
+    "act as if",
+    "pretend you are",
+    "new instructions:",
+    "override:",
+    "system prompt:",
+    "\\[INST\\]",
+    "\\[/INST\\]",
+    "<<SYS>>",
+    "<</SYS>>",
+    "<\\|im_start\\|>",
+    "<\\|im_end\\|>",
+    "### (Human|Assistant|System):",
+    "\\bBEGIN INSTRUCTION\\b",
+    "\\bEND INSTRUCTION\\b"
+  )
+
+  combined_pattern <- paste(injection_patterns, collapse = "|")
+  text <- gsub(combined_pattern, "", text, ignore.case = TRUE, perl = TRUE)
+
+  text <- trimws(text)
+
+  return(text)
+}
+
+#' Check Rate Limit
+#'
+#' @param session_token Shiny session token
+#' @param user_requests Reactive value storing request history
+#' @param max_requests Maximum requests allowed in time window
+#' @param window_seconds Time window in seconds (default: 3600 = 1 hour)
+#' @return TRUE if within limit, stops with error if exceeded
+#' @keywords internal
+check_rate_limit <- function(session_token, user_requests, max_requests = 100, window_seconds = 3600) {
+  current_time <- Sys.time()
+  requests <- user_requests()
+
+  if (is.null(requests[[session_token]])) {
+    requests[[session_token]] <- list()
+  }
+
+  requests[[session_token]] <- Filter(function(x) {
+    difftime(current_time, x, units = "secs") < window_seconds
+  }, requests[[session_token]])
+
+  if (length(requests[[session_token]]) >= max_requests) {
+    stop("Rate limit exceeded. You have made too many requests. Please wait before trying again.")
+  }
+
+  requests[[session_token]] <- c(requests[[session_token]], current_time)
+  user_requests(requests)
+
+  return(TRUE)
+}
+
+#' Log Security Event
+#'
+#' @param event_type Type of security event
+#' @param details Additional details about the event
+#' @param session_info Shiny session object
+#' @param level Log level ("info", "warning", "error")
+#' @keywords internal
+log_security_event <- function(event_type, details, session_info, level = "info") {
+  timestamp <- format(Sys.time(), "%Y-%m-%d %H:%M:%S")
+
+  session_token <- if (!is.null(session_info$token)) {
+    substr(session_info$token, 1, 8)
+  } else {
+    "unknown"
+  }
+
+  log_message <- paste0(
+    "[", timestamp, "] ",
+    "[", level, "] ",
+    "SECURITY: ", event_type, " | ",
+    "Session: ", session_token, "... | ",
+    "Details: ", details
+  )
+
+  log_dir <- Sys.getenv("TEXTANALYSISR_LOG_DIR", unset = "")
+  if (nzchar(log_dir) && dir.exists(log_dir)) {
+    log_file <- file.path(log_dir, "security.log")
+    tryCatch({
+      cat(log_message, "\n", file = log_file, append = TRUE)
+    }, error = function(e) {
+      warning("Failed to write security log: ", e$message)
+    })
+  }
+
+  if (Sys.getenv("ENVIRONMENT") != "production") {
+    message(log_message)
+  }
+
+  return(invisible(NULL))
+}
+
+
+.parse_provider_error <- function(provider, response_body) {
+  tryCatch({
+    parsed <- jsonlite::fromJSON(response_body)
+    detail <- if (provider == "openai") {
+      parsed$error$message
+    } else if (provider == "gemini") {
+      parsed$error$message %||% parsed$error$status
+    }
+    if (is.null(detail) || !nzchar(detail)) return(NULL)
+    if (nchar(detail) > 300) detail <- paste0(substr(detail, 1, 297), "...")
+    return(detail)
+  }, error = function(e) NULL)
+}
+
+
+.format_api_error_message <- function(provider, endpoint, status_code, response_body) {
+  status_meaning <- switch(as.character(status_code),
+    "400" = "Bad request",
+    "401" = "Authentication failed",
+    "403" = "Forbidden",
+    "404" = "Not found",
+    "429" = "Rate limit exceeded",
+    "500" = "Server error",
+    "502" = "Bad gateway",
+    "503" = "Service unavailable",
+    paste0("HTTP error ", status_code)
+  )
+
+  action <- switch(as.character(status_code),
+    "401" = {
+      key_var <- if (provider == "openai") "OPENAI_API_KEY" else "GEMINI_API_KEY"
+      paste0("Verify your ", key_var, ".")
+    },
+    "429" = "Wait and retry, or check your usage limits.",
+    "500" = "Provider-side issue. Try again later.",
+    "502" = "Provider-side issue. Try again later.",
+    "503" = "Provider-side issue. Try again later.",
+    "Check your request and try again."
+  )
+
+  provider_label <- if (provider == "openai") "OpenAI" else "Gemini"
+  msg <- sprintf("%s %s API request failed (HTTP %d: %s).\n%s",
+                 provider_label, endpoint, status_code, status_meaning, action)
+
+  detail <- .parse_provider_error(provider, response_body)
+  if (!is.null(detail)) {
+    msg <- paste0(msg, "\nProvider message: ", detail)
+  }
+
+  msg
+}
+
+
+.stop_api_error <- function(provider, endpoint, status_code, response_body) {
+  tryCatch(
+    log_security_event("api_error", sprintf("%s %s status %d: %s",
+      if (provider == "openai") "OpenAI" else "Gemini",
+      endpoint, status_code, response_body), list(token = NULL), "error"),
+    error = function(e) NULL
+  )
+  stop(.format_api_error_message(provider, endpoint, status_code, response_body),
+       call. = FALSE)
+}
+
+
+#' @keywords internal
+.ensure_python <- function(required_module = NULL, envname = NULL) {
+  if (!requireNamespace("reticulate", quietly = TRUE)) {
+    stop("Package 'reticulate' is required.")
+  }
+  if (!is.null(required_module) && !reticulate::py_module_available(required_module)) {
+    stop(sprintf(
+      "Python module '%s' not found. Run setup_python_env() or install with: pip install %s",
+      required_module, required_module
+    ))
+  }
+  invisible(TRUE)
+}
+
+.missing_api_key_message <- function(provider, context = "package") {
+  env_var <- if (provider == "openai") "OPENAI_API_KEY" else "GEMINI_API_KEY"
+  provider_label <- if (provider == "openai") "OpenAI" else "Gemini"
+
+  if (context == "shiny") {
+    return(sprintf("%s API key required. Enter in the API Key field or set %s in .Renviron.",
+                   provider_label, env_var))
+  }
+
+  paste0(
+    sprintf("No %s API key found. Provide your key using one of these methods:\n", provider_label),
+    sprintf("  1. Sys.setenv(%s = \"your-key-here\")\n", env_var),
+    sprintf("  2. Add %s=your-key-here to your .Renviron file\n", env_var),
+    "  3. Pass directly via the api_key parameter"
+  )
+}
+
+.notify_missing_api_key <- function(provider) {
+  message(.missing_api_key_message(provider, "package"))
+  invisible(NULL)
+}
+
+.notify_missing_python <- function(feature = "this feature") {
+  hint <- if (!requireNamespace("reticulate", quietly = TRUE)) {
+    "Install reticulate (install.packages('reticulate')), then run TextAnalysisR::setup_python_env()."
+  } else {
+    "Run TextAnalysisR::setup_python_env() to install Python and required modules."
+  }
+  message(sprintf("%s requires Python. %s", feature, hint))
+  invisible(NULL)
+}
+
+
+#' Validate API Key Format
+#'
+#' @description
+#' Validates API key format for OpenAI or Gemini according to NIST IA-5(1).
+#' Auto-detects provider from key prefix and validates format requirements.
+#'
+#' @param api_key Character string containing the API key
+#' @param strict Logical, if TRUE performs additional validation checks
+#'
+#' @return List with valid (logical), provider (character), and error (character if invalid)
+#' @keywords internal
+#'
+#' @section NIST Compliance:
+#' Implements NIST IA-5(1): Authenticator Management - Password-Based Authentication.
+#' Validates format, length, and character composition to prevent weak or malformed keys.
+#'
+validate_api_key <- function(api_key, strict = TRUE) {
+  if (is.null(api_key) || !is.character(api_key) || !nzchar(api_key)) {
+    return(list(valid = FALSE, provider = NULL, error = "API key is NULL, empty, or not a character string"))
+  }
+
+  # Detect provider from prefix
+  if (grepl("^sk-", api_key)) {
+    provider <- "openai"
+    min_length <- 40
+    length_msg <- "OpenAI keys are typically 48+ characters"
+  } else if (grepl("^AIza", api_key)) {
+    provider <- "gemini"
+    min_length <- 39
+    length_msg <- "Gemini keys are typically 39 characters"
+  } else {
+    return(list(
+      valid = FALSE,
+      provider = NULL,
+      error = "Unknown API key format. OpenAI keys start with 'sk-', Gemini keys start with 'AIza'"
+    ))
+  }
+
+  if (nchar(api_key) < min_length) {
+    return(list(valid = FALSE, provider = provider, error = paste("API key appears too short:", length_msg)))
+  }
+
+  if (strict) {
+    if (grepl("\\s", api_key)) {
+      return(list(valid = FALSE, provider = provider, error = "API key contains whitespace characters"))
+    }
+
+    if (grepl("[^A-Za-z0-9_-]", api_key)) {
+      return(list(valid = FALSE, provider = provider, error = "API key contains unexpected special characters"))
+    }
+  }
+
+  return(list(valid = TRUE, provider = provider, error = NULL))
+}
+
+#' Validate Column Name
+#'
+#' @description
+#' Validates column names to prevent code injection through formula construction.
+#' Ensures column names follow R naming conventions and contain no malicious patterns.
+#'
+#' @param col_name Character string containing the column name
+#'
+#' @return TRUE if valid, stops with error if invalid
+#' @keywords internal
+#'
+#' @section Security:
+#' Protects against formula injection attacks where malicious column names could
+#' execute arbitrary code when used in model formulas. Part of NIST SI-10 input validation.
+#'
+validate_column_name <- function(col_name) {
+  if (is.null(col_name) || !is.character(col_name) || !nzchar(col_name)) {
+    stop("Column name is NULL, empty, or not a character string")
+  }
+
+  if (length(col_name) != 1) {
+    stop("Column name must be a single value, not a vector")
+  }
+
+  if (!grepl("^[A-Za-z][A-Za-z0-9_\\.]*$", col_name)) {
+    stop("Invalid column name format. Column names must start with a letter and contain only letters, numbers, underscores, or periods.")
+  }
+
+  if (nchar(col_name) > 255) {
+    stop("Column name exceeds maximum length of 255 characters")
+  }
+
+  backticks <- grepl("`", col_name, fixed = TRUE)
+  if (backticks) {
+    stop("Column name contains backticks which are not allowed")
+  }
+
+  return(TRUE)
+}
+
+
+# Web accessibility utilities
+
+#' Web Accessibility Utility Functions
+#'
+#' @description Functions for ensuring WCAG 2.1 Level AA compliance in the Shiny application
+#'
+#' @section WCAG 2.1 Level AA Compliance:
+#' This package follows Web Content Accessibility Guidelines (WCAG) 2.1 Level AA:
+#' - 1.1.1 Non-text Content (Level A): Alt text for images and visualizations
+#' - 1.4.3 Contrast Minimum (Level AA): 4.5:1 ratio for normal text, 3:1 for large text/UI
+#' - 2.1.1 Keyboard (Level A): Full keyboard navigation support
+#' - 2.4.1 Bypass Blocks (Level A): Skip navigation links
+#' - 3.1.1 Language of Page (Level A): Page language identification
+#' - 4.1.2 Name, Role, Value (Level A): ARIA labels and roles
+
+#' Calculate Color Contrast Ratio
+#'
+#' @description
+#' Calculates the contrast ratio between two colors according to WCAG 2.1 standards
+#' using the relative luminance formula from W3C guidelines.
+#' Used to verify text/background color combinations meet accessibility requirements.
+#'
+#' @param foreground Foreground color (hex format, e.g., "#111827")
+#' @param background Background color (hex format, e.g., "#ffffff")
+#'
+#' @return Numeric contrast ratio (1-21)
+#' @keywords internal
+#'
+#' @section WCAG Requirements:
+#' - Normal text: Minimum 4.5:1 (Level AA)
+#' - Large text (18pt+ or 14pt+ bold): Minimum 3:1 (Level AA)
+#' - UI components and graphics: Minimum 3:1 (Level AA)
+#'
+calculate_contrast_ratio <- function(foreground, background) {
+  l1 <- .relative_luminance(.hex_to_rgb(foreground))
+  l2 <- .relative_luminance(.hex_to_rgb(background))
+  lighter <- max(l1, l2)
+  darker <- min(l1, l2)
+  round((lighter + 0.05) / (darker + 0.05), 2)
+}
+
+.hex_to_rgb <- function(hex) {
+  hex <- gsub("#", "", hex)
+  c(
+    strtoi(substr(hex, 1, 2), 16L),
+    strtoi(substr(hex, 3, 4), 16L),
+    strtoi(substr(hex, 5, 6), 16L)
+  ) / 255
+}
+
+.relative_luminance <- function(rgb) {
+  rgb <- ifelse(rgb <= 0.03928, rgb / 12.92, ((rgb + 0.055) / 1.055)^2.4)
+  0.2126 * rgb[1] + 0.7152 * rgb[2] + 0.0722 * rgb[3]
+}
+
+#' Check WCAG Contrast Compliance
+#'
+#' @description
+#' Validates if color combination meets WCAG 2.1 Level AA contrast requirements.
+#'
+#' @param foreground Foreground color (hex format)
+#' @param background Background color (hex format)
+#' @param large_text Logical, TRUE if text is large (18pt+ or 14pt+ bold)
+#'
+#' @return Logical TRUE if compliant, FALSE if not
+#' @keywords internal
+#'
+check_wcag_contrast <- function(foreground, background, large_text = FALSE) {
+  ratio <- calculate_contrast_ratio(foreground, background)
+  min_ratio <- if (large_text) 3.0 else 4.5
+
+  if (ratio >= min_ratio) {
+    return(TRUE)
+  } else {
+    warning(
+      "WCAG contrast failure: ", ratio, ":1 ratio (requires ", min_ratio, ":1)\n",
+      "  Foreground: ", foreground, "\n",
+      "  Background: ", background
+    )
+    return(FALSE)
+  }
+}
+
+#' Generate ARIA Label
+#'
+#' @description
+#' Creates accessible ARIA label for UI elements.
+#'
+#' @param element_type Type of element (e.g., "button", "input", "plot")
+#' @param action Action or purpose (e.g., "analyze", "download", "visualize")
+#' @param context Additional context (optional)
+#'
+#' @return Character string with ARIA label
+#' @keywords internal
+#'
+create_aria_label <- function(element_type, action, context = NULL) {
+  if (!is.null(context)) {
+    label <- paste(tools::toTitleCase(action), context, element_type)
+  } else {
+    label <- paste(tools::toTitleCase(action), element_type)
+  }
+  return(label)
+}
+
+#' Create Screen Reader Text
+#'
+#' @description
+#' Generates visually hidden text for screen readers (WCAG 4.1.2).
+#'
+#' @param text Text to be read by screen readers
+#'
+#' @return HTML span with sr-only class
+#' @keywords internal
+#'
+create_sr_text <- function(text) {
+  return(
+    paste0(
+      "<span class=\"sr-only\" role=\"status\" aria-live=\"polite\">",
+      text,
+      "</span>"
+    )
+  )
+}
+
+#' Validate Keyboard Navigation
+#'
+#' @description
+#' Checks if interactive elements have proper tabindex and keyboard handlers.
+#' Used for WCAG 2.1.1 (Keyboard) compliance.
+#'
+#' @param tabindex Integer, tab order (-1 for no tab, 0 for natural order, 1+ for specific order)
+#'
+#' @return Logical TRUE if valid, FALSE with warning if invalid
+#' @keywords internal
+#'
+validate_keyboard_navigation <- function(tabindex = 0) {
+  if (!is.numeric(tabindex)) {
+    warning("Tabindex must be numeric")
+    return(FALSE)
+  }
+
+  if (tabindex > 100) {
+    warning("Tabindex > 100 creates unpredictable tab order (WCAG 2.1.1)")
+    return(FALSE)
+  }
+
+  return(TRUE)
+}
+
+#' Check Alt Text Presence
+#'
+#' @description
+#' Validates that images and visualizations have alternative text descriptions.
+#' Required for WCAG 1.1.1 (Non-text Content).
+#'
+#' Note: Decorative images should use empty alt text (alt="") to indicate
+#' they should be ignored by assistive technology.
+#'
+#' @param alt_text Alternative text description
+#' @param element_type Type of element (e.g., "plot", "image", "icon")
+#' @param decorative Logical, TRUE if element is purely decorative
+#'
+#' @return Logical TRUE if valid, FALSE with warning if missing/inadequate
+#' @keywords internal
+#'
+check_alt_text <- function(alt_text, element_type = "image", decorative = FALSE) {
+  if (decorative) {
+    return(TRUE)
+  }
+
+  if (is.null(alt_text) || !nzchar(alt_text)) {
+    warning("Missing alt text for ", element_type, " (WCAG 1.1.1)")
+    return(FALSE)
+  }
+
+  if (nchar(alt_text) < 10) {
+    warning("Alt text too short for ", element_type, " (consider more descriptive text)")
+    return(FALSE)
+  }
+
+  return(TRUE)
+}
+
+
+# Plot helper functions
+
+#' Apply Standard Plotly Layout
+#'
+#' @description
+#' Applies consistent layout styling to plotly plots following TextAnalysisR design standards.
+#' This ensures all plots have uniform fonts, colors, margins, and interactive features.
+#'
+#' @param plot A plotly plot object
+#' @param title Plot title text (optional)
+#' @param xaxis_title X-axis title (optional)
+#' @param yaxis_title Y-axis title (optional)
+#' @param margin List of margins: list(t, b, l, r) in pixels (default: list(t = 60, b = 80, l = 80, r = 40))
+#' @param show_legend Logical, whether to show legend (default: FALSE)
+#'
+#' @return A plotly plot object with standardized layout
+#'
+#' @details
+#' Design standards applied:
+#' - Title: 14px Roboto, #0c1f4a
+#' - Axis titles: 13px Roboto, #0c1f4a
+#' - Axis tick labels: 12px Roboto, #3B3B3B
+#' @keywords internal
+apply_standard_plotly_layout <- function(plot,
+                                         title = NULL,
+                                         xaxis_title = NULL,
+                                         yaxis_title = NULL,
+                                         margin = list(t = 60, b = 80, l = 80, r = 40),
+                                         show_legend = FALSE) {
+
+  if (!requireNamespace("plotly", quietly = TRUE)) {
+    stop("Package 'plotly' is required. Please install it.")
+  }
+
+  layout_config <- list(
+    font = list(family = "Roboto, sans-serif", size = 16, color = "#3B3B3B"),
+    hoverlabel = list(
+      font = list(size = 16, family = "Roboto, sans-serif"),
+      align = "left"
+    ),
+    margin = margin,
+    showlegend = show_legend,
+    xaxis = list(
+      tickfont = list(size = 16, color = "#3B3B3B", family = "Roboto, sans-serif"),
+      titlefont = list(size = 16, color = "#0c1f4a", family = "Roboto, sans-serif")
+    ),
+    yaxis = list(
+      tickfont = list(size = 16, color = "#3B3B3B", family = "Roboto, sans-serif"),
+      titlefont = list(size = 16, color = "#0c1f4a", family = "Roboto, sans-serif")
+    )
+  )
+
+  if (!is.null(title)) {
+    layout_config$title <- list(
+      text = title,
+      font = list(size = 18, color = "#0c1f4a", family = "Roboto, sans-serif")
+    )
+  }
+
+  if (!is.null(xaxis_title)) {
+    layout_config$xaxis$title <- list(
+      text = xaxis_title,
+      font = list(size = 16, color = "#0c1f4a", family = "Roboto, sans-serif")
+    )
+  }
+
+  if (!is.null(yaxis_title)) {
+    layout_config$yaxis$title <- list(
+      text = yaxis_title,
+      font = list(size = 16, color = "#0c1f4a", family = "Roboto, sans-serif")
+    )
+  }
+
+  do.call(plotly::layout, c(list(p = plot), layout_config)) %>%
+    plotly::config(displayModeBar = TRUE)
+}
+
+
+#' Plotly hover tooltip config
+#' @param bgcolor Tooltip background color.
+#' @param fontcolor Tooltip text color.
+#' @return A list for `plotly::layout(hoverlabel = ...)`.
+#' @keywords internal
+get_plotly_hover_config <- function(bgcolor = "#ffffff", fontcolor = "#0c1f4a") {
+  list(
+    bgcolor = bgcolor,
+    bordercolor = bgcolor,
+    font = list(
+      family = "Roboto, sans-serif",
+      size = 16,
+      color = fontcolor
+    ),
+    align = "left",
+    namelength = -1
+  )
+}
+
+
+#' Create Standard ggplot2 Theme
+#'
+#' @description
+#' Returns a standardized ggplot2 theme matching TextAnalysisR design standards.
+#'
+#' @param base_size Base font size (default: 14)
+#'
+#' @return A ggplot2 theme object
+#'
+#' @concept visualization
+#' @keywords internal
+#'
+create_standard_ggplot_theme <- function(base_size = 11) {
+
+  if (!requireNamespace("ggplot2", quietly = TRUE)) {
+    stop("Package 'ggplot2' is required. Please install it.")
+  }
+
+  ggplot2::theme_minimal(base_size = base_size) +
+    ggplot2::theme(
+      plot.title = ggplot2::element_text(
+        size = 13,
+        color = "#0c1f4a",
+        hjust = 0.5
+      ),
+      axis.title = ggplot2::element_text(
+        size = 12,
+        color = "#0c1f4a"
+      ),
+      axis.text = ggplot2::element_text(
+        size = 11,
+        color = "#3B3B3B"
+      ),
+      strip.text = ggplot2::element_text(
+        size = 11,
+        color = "#0c1f4a"
+      ),
+      legend.text = ggplot2::element_text(
+        size = 11,
+        color = "#3B3B3B"
+      ),
+      legend.title = ggplot2::element_text(
+        size = 12,
+        color = "#0c1f4a"
+      )
+    )
+}
+
+
+#' Get Sentiment Color Palette
+#'
+#' @description
+#' Returns standardized color mapping for sentiment analysis.
+#'
+#' @return Named vector of colors
+#'
+#' @concept visualization
+#' @keywords internal
+#' @export
+get_sentiment_colors <- function() {
+  c(
+    "positive" = "#10B981",
+    "negative" = "#EF4444",
+    "neutral" = "#6B7280"
+  )
+}
+
+
+#' Generate Sentiment Color Gradient
+#'
+#' @description
+#' Generates a color based on sentiment score using a gradient from red (negative)
+#' through gray (neutral) to green (positive).
+#'
+#' @param score Numeric sentiment score (typically -1 to 1)
+#'
+#' @return Hex color string
+#'
+#' @concept visualization
+#' @keywords internal
+#' @export
+#'
+#' @examples
+#' get_sentiment_color(-0.8)  # Red
+#' get_sentiment_color(0)     # Gray
+#' get_sentiment_color(0.8)   # Green
+get_sentiment_color <- function(score) {
+  normalized_score <- (score + 1) / 2
+  normalized_score <- pmax(0, pmin(1, normalized_score))
+
+  if (normalized_score < 0.5) {
+    t <- normalized_score * 2
+    r <- round(185 * (1 - t) + 75 * t)
+    g <- round(67 * (1 - t) + 181 * t)
+    b <- round(68 * (1 - t) + 67 * t)
+  } else {
+    t <- (normalized_score - 0.5) * 2
+    r <- round(75 * (1 - t) + 16 * t)
+    g <- round(181 * (1 - t) + 185 * t)
+    b <- round(67 * (1 - t) + 129 * t)
+  }
+
+  sprintf("#%02X%02X%02X", r, g, b)
+}
+
+
+#' Single-cell message DT table
+#' @param message Character message to display.
+#' @param font_size CSS font size.
+#' @param color CSS color.
+#' @return A `DT::datatable` htmlwidget.
+#' @keywords internal
+create_message_table <- function(message,
+                                 font_size = "16px",
+                                 color = "#6c757d") {
+
+  if (!requireNamespace("DT", quietly = TRUE)) {
+    stop("Package 'DT' is required. Please install it.")
+  }
+
+  DT::datatable(
+    data.frame(Message = message),
+    rownames = FALSE,
+    options = list(
+      dom = "t",
+      ordering = FALSE,
+      columnDefs = list(
+        list(className = "dt-center", targets = "_all")
+      ),
+      initComplete = htmlwidgets::JS(
+        sprintf(
+          "function(settings, json) {
+            $(this.api().table().container()).find('td').css({
+              'font-size': '%s',
+              'color': '%s',
+              'padding': '40px',
+              'text-align': 'center'
+            });
+          }",
+          font_size,
+          color
+        )
+      )
+    ),
+    class = "cell-border stripe"
+  )
+}
+
+
+#' Empty plotly placeholder
+#' @param message Message to display.
+#' @param color Text color.
+#' @param font_size Font size in px.
+#' @return A `plotly` htmlwidget.
+#' @keywords internal
+create_empty_plot_message <- function(message,
+                                       color = "#6B7280",
+                                       font_size = 16) {
+
+  if (!requireNamespace("plotly", quietly = TRUE)) {
+    stop("Package 'plotly' is required. Please install it.")
+  }
+
+  plotly::plot_ly(type = "scatter", mode = "markers") %>%
+    plotly::layout(
+      xaxis = list(
+        showgrid = FALSE,
+        zeroline = FALSE,
+        showticklabels = FALSE,
+        title = ""
+      ),
+      yaxis = list(
+        showgrid = FALSE,
+        zeroline = FALSE,
+        showticklabels = FALSE,
+        title = ""
+      ),
+      annotations = list(
+        list(
+          text = message,
+          x = 0.5,
+          y = 0.5,
+          xref = "paper",
+          yref = "paper",
+          showarrow = FALSE,
+          font = list(
+            size = font_size,
+            color = color,
+            family = "Roboto, sans-serif"
+          )
+        )
+      )
+    ) %>%
+    plotly::config(displayModeBar = FALSE)
+}
+
+
+#' Default DT datatable options
+#' @param scroll_y CSS height for vertical scrolling.
+#' @param page_length Default page length.
+#' @param show_buttons Include copy/csv/excel/pdf/print buttons.
+#' @return A list for `DT::datatable(options = ...)`.
+#' @keywords internal
+get_dt_options <- function(scroll_y = "400px",
+                            page_length = 25,
+                            show_buttons = TRUE) {
+  opts <- list(
+    scrollX = TRUE,
+    scrollY = scroll_y,
+    pageLength = page_length
+  )
+
+  if (show_buttons) {
+    opts$dom <- "Bfrtip"
+    opts$buttons <- c("copy", "csv", "excel", "pdf", "print")
+  }
+
+  opts
+}
+
+
+# Shiny UI helper functions
+
+#' Show persistent loading notification
+#' @param message Notification text.
+#' @param id Optional unique id for later removal.
+#' @param session Shiny session. Defaults to the current reactive domain.
+#' @return Invisibly the notification id.
+#' @keywords internal
+show_loading_notification <- function(message, id = NULL, session = NULL) {
+  if (!requireNamespace("shiny", quietly = TRUE)) {
+    stop("The 'shiny' package is required for this function.")
+  }
+
+  if (is.null(session)) session <- shiny::getDefaultReactiveDomain()
+  if (is.null(session)) return(invisible(NULL))
+
+  tryCatch(
+    shiny::showNotification(message, type = "message", duration = NULL, id = id, session = session),
+    error = function(e) NULL
+  )
+
+  invisible(NULL)
+}
+
+#' Show completion notification
+#' @param message Notification text.
+#' @param duration Seconds until auto-dismiss.
+#' @param session Shiny session. Defaults to the current reactive domain.
+#' @return Invisibly the notification id.
+#' @keywords internal
+show_completion_notification <- function(message, duration = 5, session = NULL) {
+  if (!requireNamespace("shiny", quietly = TRUE)) {
+    stop("The 'shiny' package is required for this function.")
+  }
+
+  if (is.null(session)) session <- shiny::getDefaultReactiveDomain()
+  if (is.null(session)) return(invisible(NULL))
+
+  tryCatch(
+    shiny::showNotification(message, type = "message", duration = duration, session = session),
+    error = function(e) NULL
+  )
+
+  invisible(NULL)
+}
+
+#' Show error notification
+#' @param message Notification text.
+#' @param duration Seconds until auto-dismiss.
+#' @param session Shiny session. Defaults to the current reactive domain.
+#' @return Invisibly the notification id.
+#' @keywords internal
+show_error_notification <- function(message, duration = 7, session = NULL) {
+  if (!requireNamespace("shiny", quietly = TRUE)) {
+    stop("The 'shiny' package is required for this function.")
+  }
+
+  if (is.null(session)) session <- shiny::getDefaultReactiveDomain()
+  if (is.null(session)) return(invisible(NULL))
+
+  tryCatch(
+    shiny::showNotification(message, type = "error", duration = duration, session = session),
+    error = function(e) NULL
+  )
+
+  invisible(NULL)
+}
+
+#' Show warning notification
+#' @param message Notification text.
+#' @param duration Seconds until auto-dismiss.
+#' @param session Shiny session. Defaults to the current reactive domain.
+#' @return Invisibly the notification id.
+#' @keywords internal
+show_warning_notification <- function(message, duration = 5, session = NULL) {
+  if (!requireNamespace("shiny", quietly = TRUE)) {
+    stop("The 'shiny' package is required for this function.")
+  }
+
+  if (is.null(session)) session <- shiny::getDefaultReactiveDomain()
+  if (is.null(session)) return(invisible(NULL))
+
+  tryCatch(
+    shiny::showNotification(message, type = "warning", duration = duration, session = session),
+    error = function(e) NULL
+  )
+
+  invisible(NULL)
+}
+
+#' Remove Shiny notification by id
+#' @param id Notification id.
+#' @param session Shiny session. Defaults to the current reactive domain.
+#' @return Invisibly `NULL`.
+#' @keywords internal
+remove_notification_by_id <- function(id, session = NULL) {
+  if (!requireNamespace("shiny", quietly = TRUE)) {
+    stop("The 'shiny' package is required for this function.")
+  }
+
+  if (is.null(session)) session <- shiny::getDefaultReactiveDomain()
+  if (is.null(session)) return(invisible(NULL))
+
+  tryCatch(
+    shiny::removeNotification(id, session = session),
+    error = function(e) NULL
+  )
+
+  invisible(NULL)
+}
+
+#' Show no-DFM notification
+#' @param feature_name Feature description in the message.
+#' @param duration Seconds until auto-dismiss.
+#' @return Invisibly the notification id.
+#' @keywords internal
+show_no_dfm_notification <- function(feature_name = "this feature", duration = 7) {
+  if (!requireNamespace("shiny", quietly = TRUE)) {
+    stop("The 'shiny' package is required for this function.")
+  }
+
+  message <- paste0(
+    "No document-feature matrix available. ",
+    "Please complete preprocessing (at least Step 4: DFM) first."
+  )
+
+  shiny::showNotification(
+    message,
+    type = "error",
+    duration = duration
+  )
+
+  invisible(NULL)
+}
+
+#' Show no-feature-matrix notification
+#' @param duration Seconds until auto-dismiss.
+#' @return Invisibly the notification id.
+#' @keywords internal
+show_no_feature_matrix_notification <- function(duration = 7) {
+  if (!requireNamespace("shiny", quietly = TRUE)) {
+    stop("The 'shiny' package is required for this function.")
+  }
+
+  shiny::showNotification(
+    "No feature matrix available. Please complete preprocessing (at least Step 4: DFM) first.",
+    type = "error",
+    duration = duration
+  )
+
+  invisible(NULL)
+}
+
+#' Show united-texts-required notification
+#' @param duration Seconds until auto-dismiss.
+#' @return Invisibly the notification id.
+#' @keywords internal
+show_unite_texts_required_notification <- function(duration = 5) {
+  if (!requireNamespace("shiny", quietly = TRUE)) {
+    stop("The 'shiny' package is required for this function.")
+  }
+
+  shiny::showNotification(
+    "Please create united texts first in the preprocessing steps (Step 1: Unite texts).",
+    type = "error",
+    duration = duration
+  )
+
+  invisible(NULL)
+}
+
+#' Show guide modal
+#' @param guide_name Guide identifier (filename stem).
+#' @param title Modal title.
+#' @param size Modal size ("s", "m", "l", "xl").
+#' @return Invisibly `NULL`.
+#' @keywords internal
+show_guide_modal <- function(guide_name, title, size = "l") {
+  if (!requireNamespace("shiny", quietly = TRUE)) {
+    stop("The 'shiny' package is required for this function.")
+  }
+
+  if (!requireNamespace("htmltools", quietly = TRUE)) {
+    stop("The 'htmltools' package is required for this function.")
+  }
+
+  # strip any directory components from guide_name to block path traversal
+  guide_name <- basename(as.character(guide_name))
+  if (!grepl("^[A-Za-z0-9_-]+$", guide_name)) {
+    stop("Invalid guide_name; allowed: letters, digits, underscore, hyphen.")
+  }
+
+  guide_path <- system.file(
+    "TextAnalysisR.app", "markdown", "guides",
+    paste0(guide_name, ".html"),
+    package = "TextAnalysisR"
+  )
+
+  if (!file.exists(guide_path) || guide_path == "") {
+    guide_path <- file.path(
+      "inst", "TextAnalysisR.app", "markdown", "guides",
+      paste0(guide_name, ".html")
+    )
+  }
+
+  if (!file.exists(guide_path)) {
+    guide_path <- file.path(
+      "markdown", "guides",
+      paste0(guide_name, ".html")
+    )
+  }
+
+  if (file.exists(guide_path)) {
+    content <- htmltools::HTML(paste(readLines(guide_path, warn = FALSE), collapse = "\n"))
+  } else {
+    content <- htmltools::tags$p(
+      paste0("Guide content not found: ", guide_name, ".html"),
+      style = "color: #DC2626;"
+    )
+  }
+
+  shiny::showModal(
+    shiny::modalDialog(
+      title = title,
+      size = size,
+      content,
+      footer = shiny::modalButton("Close"),
+      easyClose = TRUE
+    )
+  )
+
+  invisible(NULL)
+}
+
+#' Show DFM-required modal
+#' @param feature_name Feature description in the message.
+#' @param additional_message Optional extra context appended to the body.
+#' @return Invisibly `NULL`.
+#' @keywords internal
+show_dfm_required_modal <- function(feature_name = "this feature", additional_message = NULL) {
+  if (!requireNamespace("shiny", quietly = TRUE)) {
+    stop("The 'shiny' package is required for this function.")
+  }
+
+  message_content <- list(
+    shiny::p("No document-feature matrix (DFM) found."),
+    shiny::p("Please complete the required preprocessing steps:")
+  )
+
+  if (!is.null(additional_message)) {
+    message_content <- c(message_content, list(shiny::p(additional_message)))
+  }
+
+  message_content <- c(
+    message_content,
+    list(
+      shiny::tags$div(
+        style = "margin-left: 20px; margin-top: 10px;",
+        shiny::tags$p(
+          shiny::tags$strong(style = "color: #DC2626;", "Required:"),
+          style = "margin-bottom: 5px;"
+        ),
+        shiny::tags$ul(
+          shiny::tags$li(shiny::tags$strong("Step 1:"), " Unite Texts"),
+          shiny::tags$li(shiny::tags$strong("Step 4:"), " Document-Feature Matrix (DFM)")
+        ),
+        shiny::tags$p(
+          shiny::tags$strong(style = "color: #6B7280;", "Optional:"),
+          " Steps 2, 3, 5, and 6",
+          style = "margin-top: 10px; font-size: 12px;"
+        )
+      )
+    )
+  )
+
+  shiny::showModal(
+    shiny::modalDialog(
+      title = "Preprocessing Required",
+      message_content,
+      easyClose = TRUE,
+      footer = shiny::modalButton("OK")
+    )
+  )
+
+  invisible(NULL)
+}
+
+#' Show preprocessing-steps modal
+#' @param title Modal title.
+#' @param message Lead message.
+#' @param required_steps Character vector of required step labels.
+#' @param optional_steps Character vector of optional step labels.
+#' @param additional_note Optional note appended to the body.
+#' @return Invisibly `NULL`.
+#' @keywords internal
+show_preprocessing_steps_modal <- function(title = "Preprocessing Required",
+                                          message,
+                                          required_steps,
+                                          optional_steps = NULL,
+                                          additional_note = NULL) {
+  if (!requireNamespace("shiny", quietly = TRUE)) {
+    stop("The 'shiny' package is required for this function.")
+  }
+
+  content <- list(shiny::p(message))
+
+  steps_div <- shiny::tags$div(
+    style = "margin-left: 20px; margin-top: 10px;",
+    shiny::tags$p(
+      shiny::tags$strong(style = "color: #DC2626;", "Required:"),
+      style = "margin-bottom: 5px;"
+    ),
+    shiny::tags$ul(
+      lapply(required_steps, function(step) shiny::tags$li(step))
+    )
+  )
+
+  if (!is.null(optional_steps)) {
+    steps_div <- shiny::tagAppendChild(
+      steps_div,
+      shiny::tags$p(
+        shiny::tags$strong(style = "color: #6B7280;", "Optional:"),
+        paste(optional_steps, collapse = ", "),
+        style = "margin-top: 10px; font-size: 12px;"
+      )
+    )
+  }
+
+  content <- c(content, list(steps_div))
+
+  if (!is.null(additional_note)) {
+    content <- c(content, list(shiny::p(additional_note, style = "margin-top: 10px; font-size: 12px; color: #6B7280;")))
+  }
+
+  shiny::showModal(
+    shiny::modalDialog(
+      title = title,
+      content,
+      easyClose = TRUE,
+      footer = shiny::modalButton("OK")
+    )
+  )
+
+  invisible(NULL)
+}
+
+#' Generate DFM Setup Instructions Text
+#'
+#' @description
+#' Generates standardized text instructions for creating a DFM.
+#' Used in console output or verbatim text displays.
+#'
+#' @param feature_name Name of the feature requiring DFM (default: "this feature")
+#'
+#' @return Character vector of instruction lines
+#'
+#' @keywords internal
+#'
+get_dfm_setup_instructions <- function(feature_name = "this feature") {
+  c(
+    "Warning: DFM Processing Required\n",
+    "Please complete the following steps first:\n",
+    "1. Go to the 'Preprocess' tab",
+    "2. Navigate to Step 4: Document-Feature Matrix",
+    "3. Click the 'Process' button\n",
+    paste0("Once the DFM is created, you can return here to use ", feature_name, ".")
+  )
+}
+
+#' Show DFM instructions modal
+#' @param output_id Output id to reset after modal closes.
+#' @param feature_name Feature description in the instructions.
+#' @param session Shiny session.
+#' @return Invisibly `NULL`.
+#' @keywords internal
+show_dfm_instructions_modal <- function(output_id, feature_name = "this feature", session = NULL) {
+  if (!requireNamespace("shiny", quietly = TRUE)) {
+    stop("The 'shiny' package is required for this function.")
+  }
+
+  if (is.null(session)) {
+    session <- shiny::getDefaultReactiveDomain()
+  }
+
+  shiny::showModal(
+    shiny::modalDialog(
+      title = "DFM Required",
+      shiny::verbatimTextOutput(output_id),
+      easyClose = TRUE,
+      footer = shiny::modalButton("Close")
+    )
+  )
+
+  invisible(NULL)
+}
+
+#' Show preprocessing-required modal
+#' @param message Modal body message.
+#' @param title Modal title.
+#' @return Invisibly `NULL`.
+#' @keywords internal
+show_preprocessing_required_modal <- function(message = "Please complete preprocessing steps first.",
+                                             title = "Preprocessing Required") {
+  if (!requireNamespace("shiny", quietly = TRUE)) {
+    stop("The 'shiny' package is required for this function.")
+  }
+
+  shiny::showModal(
+    shiny::modalDialog(
+      title = title,
+      shiny::p(message),
+      easyClose = TRUE,
+      footer = shiny::modalButton("OK")
+    )
+  )
+
+  invisible(NULL)
+}
+
+
+# Text Formatting Utilities ----
+
+#' Truncate Text with Ellipsis
+#'
+#' @description Truncates text to a maximum number of characters and adds
+#'   ellipsis if truncated.
+#'
+#' @param text Character string to truncate.
+#' @param max_chars Maximum number of characters (default: 50).
+#'
+#' @return Truncated text with "..." appended if truncated.
+#'
+#' @concept text-utilities
+#' @keywords internal
+truncate_text_with_ellipsis <- function(text, max_chars = 50) {
+  text <- as.character(text)
+  if (nchar(text) <= max_chars) {
+    return(text)
+  }
+  paste0(substr(text, 1, max_chars), "...")
+}
+
+#' Truncate Text to Word Count
+#'
+#' @description Truncates text to a maximum number of words and adds
+#'   ellipsis if truncated.
+#'
+#' @param text Character string to truncate.
+#' @param max_words Maximum number of words (default: 150).
+#'
+#' @return Truncated text with "..." appended if truncated.
+#'
+#' @concept text-utilities
+#' @keywords internal
+truncate_text_to_words <- function(text, max_words = 150) {
+  text <- as.character(text)
+  words <- strsplit(text, "\\s+")[[1]]
+
+  if (length(words) > max_words) {
+    truncated_text <- paste(words[1:max_words], collapse = " ")
+    return(paste0(truncated_text, "..."))
+  } else {
+    return(text)
+  }
+}
+
+#' Wrap Long Text with Line Breaks
+#'
+#' @description Wraps long text by inserting line breaks at word boundaries.
+#'   Handles both spaced text and continuous text (like URLs).
+#'
+#' @param text Character string to wrap.
+#' @param chars_per_line Maximum characters per line (default: 50).
+#' @param max_lines Maximum number of lines (default: 3).
+#'
+#' @return Text with line breaks inserted.
+#'
+#' @concept text-utilities
+#' @keywords internal
+wrap_long_text <- function(text, chars_per_line = 50, max_lines = 3) {
+  text <- as.character(text)
+
+  if (nchar(text) <= chars_per_line) return(text)
+
+  # Handle text without spaces (like URLs)
+  if (!grepl(" ", text) && nchar(text) > chars_per_line) {
+    lines <- character()
+    remaining_text <- text
+    while (nchar(remaining_text) > chars_per_line && length(lines) < max_lines - 1) {
+      lines <- c(lines, substr(remaining_text, 1, chars_per_line))
+      remaining_text <- substr(remaining_text, chars_per_line + 1, nchar(remaining_text))
+    }
+    if (nchar(remaining_text) > 0) {
+      if (nchar(remaining_text) > chars_per_line) {
+        lines <- c(lines, paste0(substr(remaining_text, 1, chars_per_line - 3), "..."))
+      } else {
+        lines <- c(lines, remaining_text)
+      }
+    }
+    return(paste(lines, collapse = "\n"))
+  }
+
+  # Handle normal text with spaces
+  words <- strsplit(text, " ")[[1]]
+  lines <- character()
+  current_line <- ""
+
+  for (word in words) {
+    if (length(lines) >= max_lines - 1 && current_line != "") {
+      lines <- c(lines, paste0(current_line, "..."))
+      break
+    }
+
+    if (current_line == "") {
+      test_line <- word
+    } else {
+      test_line <- paste(current_line, word)
+    }
+
+    if (nchar(test_line) <= chars_per_line) {
+      current_line <- test_line
+    } else {
+      if (current_line != "") {
+        lines <- c(lines, current_line)
+        current_line <- word
+      } else {
+        if (length(lines) < max_lines - 1) {
+          lines <- c(lines, paste0(substr(word, 1, chars_per_line - 3), "..."))
+          current_line <- ""
+        }
+      }
+    }
+  }
+
+  if (nchar(current_line) > 0) {
+    if (length(lines) < max_lines) {
+      lines <- c(lines, current_line)
+    }
+  }
+
+  paste(lines[seq_len(min(length(lines), max_lines))], collapse = "\n")
+}
+
+#' Wrap text for tooltip display
+#' @param text Input string.
+#' @param max_words Maximum words to keep.
+#' @param chars_per_line Approximate line width.
+#' @param max_lines Maximum lines.
+#' @return A string with HTML `<br>` breaks.
+#' @keywords internal
+wrap_text_for_tooltip <- function(text, max_words = 150, chars_per_line = 50, max_lines = 3) {
+  text <- as.character(text)
+
+  # Limit to 150 characters first
+  if (nchar(text) > 150) {
+    text_to_use <- substr(text, 1, 150)
+    needs_ellipsis <- TRUE
+  } else {
+    text_to_use <- text
+    needs_ellipsis <- FALSE
+  }
+
+  if (nchar(text_to_use) <= chars_per_line) {
+    return(text_to_use)
+  }
+
+  result <- ""
+  lines_created <- 0
+  current_pos <- 1
+
+  while (current_pos <= nchar(text_to_use) && lines_created < max_lines) {
+    end_pos <- min(current_pos + chars_per_line - 1, nchar(text_to_use))
+    line_text <- substr(text_to_use, current_pos, end_pos)
+
+    if (end_pos < nchar(text_to_use) && lines_created < max_lines - 1) {
+      last_space <- regexpr(" [^ ]*$", line_text)
+      if (last_space > 0) {
+        line_text <- substr(line_text, 1, last_space - 1)
+        end_pos <- current_pos + last_space - 2
+      }
+    }
+
+    if (result == "") {
+      result <- line_text
+    } else {
+      result <- paste0(result, "\n", line_text)
+    }
+
+    lines_created <- lines_created + 1
+    current_pos <- end_pos + 2
+  }
+
+  if (needs_ellipsis || current_pos <= nchar(text_to_use)) {
+    result <- paste0(result, "...")
+  }
+
+  return(result)
+}
+
+
+# Matrix Utilities ----
+
+#' Clean Similarity Matrix
+#'
+#' @description Cleans a similarity matrix by handling NA/Inf values,
+#'   ensuring symmetry, and setting diagonal to 1.
+#'
+#' @param similarity_matrix A numeric matrix of similarity values.
+#'
+#' @return Cleaned similarity matrix.
+#'
+#' @concept matrix-utilities
+#' @keywords internal
+clean_similarity_matrix <- function(similarity_matrix) {
+  # Replace non-finite values with 0
+  similarity_matrix[!is.finite(similarity_matrix)] <- 0
+
+  # Ensure symmetry
+  if (nrow(similarity_matrix) == ncol(similarity_matrix)) {
+    similarity_matrix <- (similarity_matrix + t(similarity_matrix)) / 2
+  }
+
+  # Set diagonal to 1
+  if (nrow(similarity_matrix) == ncol(similarity_matrix)) {
+    diag(similarity_matrix) <- 1
+  }
+
+  return(similarity_matrix)
+}
+
+#' Renumber Clusters Sequentially
+#'
+#' @description Renumbers cluster assignments to sequential integers
+#'   starting from 1.
+#'
+#' @param clusters A vector of cluster assignments.
+#'
+#' @return Vector with clusters renumbered sequentially (1, 2, 3, ...).
+#'
+#' @concept matrix-utilities
+#' @keywords internal
+renumber_clusters_sequentially <- function(clusters) {
+  if (is.null(clusters) || length(clusters) == 0) {
+    return(clusters)
+  }
+
+  unique_clusters <- sort(unique(clusters))
+  cluster_mapping <- stats::setNames(seq_along(unique_clusters), unique_clusters)
+  return(cluster_mapping[as.character(clusters)])
+}
