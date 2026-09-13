@@ -2,8 +2,7 @@
 knitr::opts_chunk$set(message = FALSE, warning = FALSE)
 
 ## ----eval = FALSE-------------------------------------------------------------
-# install.packages("TextAnalysisR",
-#   repos = c("https://mshin77.r-universe.dev", "https://cloud.r-project.org"))
+# install.packages("TextAnalysisR")
 
 ## ----eval = FALSE-------------------------------------------------------------
 # library(TextAnalysisR)

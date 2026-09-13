@@ -44,6 +44,12 @@
   --color-warning: #B15319;
   --color-error: #DC2626;
   --color-info: #1E71A1;
+  --color-ai: #6B46C1;
+}
+
+/* Shared marker for AI/LLM-powered actions (sparkle glyph) */
+.icon-ai {
+  color: var(--color-ai);
 }
 
 h1,
@@ -367,6 +373,7 @@ body {
 
 [data-theme="dark"] .status-icon-purple { color: #A78BFA; }
 [data-theme="dark"] .status-icon-green-alt { color: #4ADE80; }
+[data-theme="dark"] .icon-ai { color: #A78BFA; }
 
 /* --- LEGACY CLASSES (for backward compatibility) --- */
 .alert-warning-custom {
@@ -532,6 +539,22 @@ a.shiny-bound-input.action-button:hover {
   color: #23527c !important;
   text-decoration: underline;
   background-color: transparent !important;
+}
+
+/* Guide info icons: match the primary theme blue, transparent background, both themes.
+   Covers both FA4/5 (fa-info-circle) and FA6 canonical (fa-circle-info) class names. */
+a.action-button .fa-info-circle,
+a.action-button .fa-circle-info,
+a.action-link .fa-info-circle,
+a.action-link .fa-circle-info {
+  color: #4269BF !important;
+  background-color: transparent !important;
+}
+[data-theme="dark"] a.action-button .fa-info-circle,
+[data-theme="dark"] a.action-button .fa-circle-info,
+[data-theme="dark"] a.action-link .fa-info-circle,
+[data-theme="dark"] a.action-link .fa-circle-info {
+  color: #60A5FA !important;
 }
 
 .btn:hover,
@@ -805,6 +828,13 @@ code {
 
 .form-group.shiny-input-container input[type="text"] {
   font-size: 16px;
+}
+
+/* add custom entity: swatch/name/button share one row — drop per-input margin */
+.custom-entity-row { margin-bottom: 8px; }
+
+.custom-entity-row .form-group.shiny-input-container {
+  margin-bottom: 0;
 }
 
 input[type="file"] {
@@ -2700,8 +2730,8 @@ a.action-link[title*="Info"]:hover {
 
 /* Dark mode language menu */
 [data-theme="dark"] #translate_dropdown {
-  background: #1f1f1f;
-  border-color: #333;
+  background: #1f1f1f !important;
+  border-color: #333 !important;
 }
 
 [data-theme="dark"] .lang-btn {
@@ -2722,9 +2752,21 @@ a.action-link[title*="Info"]:hover {
 }
 
 [data-theme="dark"] .translate-attribution {
-  background: #1a1a1a;
-  border-color: #333;
+  background: #1a1a1a !important;
+  border-color: #333 !important;
   color: #6b7280;
+}
+
+/* TTS read-along: current block focus outline (no fill, no layout shift) */
+.tts-reading {
+  outline: 2px solid #ca8a04;
+  outline-offset: 2px;
+  border-radius: 5px;
+  scroll-margin: 120px;
+}
+
+[data-theme="dark"] .tts-reading {
+  outline-color: #facc15;
 }
 
 /* ============================================
@@ -2746,3 +2788,28 @@ a.action-link[title*="Info"]:hover {
   border-color: #5F7088 !important;
 }
 
+
+/* subtabs */
+.nav-tabs>li>a {
+  font-size: 14px;
+  padding: 8px 10px;
+}
+
+/* qc buttons */
+.qc-btn-row {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.qc-btn-row .btn {
+  flex: 1;
+  margin: 0;
+  white-space: nowrap;
+}
+
+/* mid-width sidebar */
+@media (min-width: 768px) and (max-width: 1199px) {
+  .row > .col-sm-3 { width: 33.333%; }
+  .row > .col-sm-9 { width: 66.667%; }
+}

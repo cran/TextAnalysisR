@@ -265,7 +265,7 @@ calculate_document_similarity <- function(texts,
 #'
 #' @description
 #' Performs semantic analysis including similarity, dimensionality reduction,
-#' and clustering. This is a high-level wrapper function.
+#' and clustering in a single call.
 #'
 #' @param texts A character vector of texts to analyze.
 #' @param analysis_types Types of analysis to perform: "similarity", "dimensionality_reduction", "clustering".
@@ -625,7 +625,7 @@ reduce_dimensions <- function(data_matrix,
   }))
 }
 
-#' @title Embedding-based Document Clustering
+#' @title Embedding-Based Document Clustering
 #'
 #' @description
 #' This function performs clustering analysis using various methods, ordered
@@ -1016,7 +1016,7 @@ generate_embeddings <- function(texts, model = "all-MiniLM-L6-v2", verbose = TRU
 }
 
 #' @title Semantic Similarity Analysis
-#' @description Wrapper for calculate_document_similarity
+#' @description Runs document similarity analysis using calculate_document_similarity.
 #' @param ... Arguments passed to calculate_document_similarity
 #' @return Similarity analysis results
 #' @concept semantic
@@ -2570,10 +2570,20 @@ sentiment_lexicon_analysis <- function(dfm_object,
 }
 
 
-#' Embedding-based Sentiment Analysis
+.sentiment_sign <- function(label) {
+  label <- tolower(trimws(label))
+  if (label == "positive") return(1)
+  if (label == "negative") return(-1)
+  if (label == "neutral") return(0)
+  stars <- suppressWarnings(as.integer(sub("\\s*stars?$", "", label)))
+  if (!is.na(stars)) return((stars - 3) / 2)
+  NA_real_
+}
+
+#' Embedding-Based Sentiment Analysis
 #'
 #' @description
-#' Performs sentiment analysis using transformer-based embeddings and neural models.
+#' Performs sentiment analysis with a fine-tuned transformer classifier.
 #' This approach uses pre-trained language models for contextual sentiment detection
 #' without requiring sentiment lexicons. Particularly effective for handling:
 #' - Complex contextual sentiment
@@ -2648,21 +2658,10 @@ sentiment_embedding_analysis <- function(texts,
       stringsAsFactors = FALSE
     )
 
-    doc_sentiment$sentiment_score <- ifelse(
-      doc_sentiment$label == "positive",
-      doc_sentiment$confidence,
-      -doc_sentiment$confidence
-    )
-
-    doc_sentiment$sentiment <- doc_sentiment$label
-
-    if ("neg" %in% doc_sentiment$label || "negative" %in% doc_sentiment$label) {
-      doc_sentiment$sentiment <- ifelse(
-        doc_sentiment$label %in% c("neg", "negative"),
-        "negative",
-        "positive"
-      )
-    }
+    signs <- vapply(doc_sentiment$label, .sentiment_sign, numeric(1))
+    doc_sentiment$sentiment_score <- signs * doc_sentiment$confidence
+    doc_sentiment$sentiment <- ifelse(is.na(signs) | signs == 0, "neutral",
+                                      ifelse(signs > 0, "positive", "negative"))
 
     summary_stats <- list(
       total_documents = length(texts),

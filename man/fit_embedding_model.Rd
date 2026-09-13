@@ -2,7 +2,7 @@
 % Please edit documentation in R/topic_modeling.R
 \name{fit_embedding_model}
 \alias{fit_embedding_model}
-\title{Fit Embedding-based Topic Model}
+\title{Fit Embedding-Based Topic Model}
 \usage{
 fit_embedding_model(
   texts,
@@ -103,7 +103,7 @@ Higher values require stronger evidence for reassignment.}
 \item{verbose}{Logical, if TRUE, prints progress messages.}
 
 \item{precomputed_embeddings}{Optional matrix of pre-computed document embeddings.
-If provided, skips embedding generation for improved performance. Must have
+If provided, skips embedding generation to avoid recomputation. Must have
 the same number of rows as the length of texts.}
 }
 \value{

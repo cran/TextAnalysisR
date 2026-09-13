@@ -1,3 +1,13 @@
+# TextAnalysisR 0.1.5
+
+- Coded output tells a declined unit from a failed call.
+- Confidence outside 0 to 1 is dropped, not clamped.
+- Inter-coder agreement reports the unit count each statistic used.
+- Coded assignments export as CSV or Excel.
+- Added `estimate_topic_effects()` for STM prevalence effects.
+- Fixed neural-classifier sentiment scoring.
+- Prevented the hosted app from crashing on large datasets.
+
 # TextAnalysisR 0.1.4
 
 - New `math_mode` argument in `prep_texts()` keeps numbers, math

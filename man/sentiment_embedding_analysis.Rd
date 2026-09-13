@@ -2,7 +2,7 @@
 % Please edit documentation in R/semantic_analysis.R
 \name{sentiment_embedding_analysis}
 \alias{sentiment_embedding_analysis}
-\title{Embedding-based Sentiment Analysis}
+\title{Embedding-Based Sentiment Analysis}
 \usage{
 sentiment_embedding_analysis(
   texts,
@@ -34,7 +34,7 @@ A list containing:
 }
 }
 \description{
-Performs sentiment analysis using transformer-based embeddings and neural models.
+Performs sentiment analysis with a fine-tuned transformer classifier.
 This approach uses pre-trained language models for contextual sentiment detection
 without requiring sentiment lexicons. Particularly effective for handling:
 \itemize{

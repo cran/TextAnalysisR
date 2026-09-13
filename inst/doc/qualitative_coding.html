@@ -1,0 +1,621 @@
+<!DOCTYPE html>
+
+<html>
+
+<head>
+
+<meta charset="utf-8" />
+<meta name="generator" content="pandoc" />
+<meta http-equiv="X-UA-Compatible" content="IE=EDGE" />
+
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+
+
+
+<title>Qualitative Coding</title>
+
+<script>// Pandoc 2.9 adds attributes on both header and div. We remove the former (to
+// be compatible with the behavior of Pandoc < 2.8).
+document.addEventListener('DOMContentLoaded', function(e) {
+  var hs = document.querySelectorAll("div.section[class*='level'] > :first-child");
+  var i, h, a;
+  for (i = 0; i < hs.length; i++) {
+    h = hs[i];
+    if (!/^h[1-6]$/i.test(h.tagName)) continue;  // it should be a header h1-h6
+    a = h.attributes;
+    while (a.length > 0) h.removeAttribute(a[0].name);
+  }
+});
+</script>
+
+<style type="text/css">
+code{white-space: pre-wrap;}
+span.smallcaps{font-variant: small-caps;}
+span.underline{text-decoration: underline;}
+div.column{display: inline-block; vertical-align: top; width: 50%;}
+div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+ul.task-list{list-style: none;}
+</style>
+
+
+
+<style type="text/css">
+code {
+white-space: pre;
+}
+.sourceCode {
+overflow: visible;
+}
+</style>
+<style type="text/css" data-origin="pandoc">
+html { -webkit-text-size-adjust: 100%; }
+pre > code.sourceCode { white-space: pre; position: relative; }
+pre > code.sourceCode > span { display: inline-block; line-height: 1.25; }
+pre > code.sourceCode > span:empty { height: 1.2em; }
+.sourceCode { overflow: visible; }
+code.sourceCode > span { color: inherit; text-decoration: inherit; }
+div.sourceCode { margin: 1em 0; }
+pre.sourceCode { margin: 0; }
+@media screen {
+div.sourceCode { overflow: auto; }
+}
+@media print {
+pre > code.sourceCode { white-space: pre-wrap; }
+pre > code.sourceCode > span { text-indent: -5em; padding-left: 5em; }
+}
+pre.numberSource code
+{ counter-reset: source-line 0; }
+pre.numberSource code > span
+{ position: relative; left: -4em; counter-increment: source-line; }
+pre.numberSource code > span > a:first-child::before
+{ content: counter(source-line);
+position: relative; left: -1em; text-align: right; vertical-align: baseline;
+border: none; display: inline-block;
+-webkit-touch-callout: none; -webkit-user-select: none;
+-khtml-user-select: none; -moz-user-select: none;
+-ms-user-select: none; user-select: none;
+padding: 0 4px; width: 4em;
+color: #aaaaaa;
+}
+pre.numberSource { margin-left: 3em; border-left: 1px solid #aaaaaa; padding-left: 4px; }
+div.sourceCode
+{ }
+@media screen {
+pre > code.sourceCode > span > a:first-child::before { text-decoration: underline; }
+}
+code span.al { color: #ff0000; font-weight: bold; } 
+code span.an { color: #60a0b0; font-weight: bold; font-style: italic; } 
+code span.at { color: #7d9029; } 
+code span.bn { color: #40a070; } 
+code span.bu { color: #008000; } 
+code span.cf { color: #007020; font-weight: bold; } 
+code span.ch { color: #4070a0; } 
+code span.cn { color: #880000; } 
+code span.co { color: #60a0b0; font-style: italic; } 
+code span.cv { color: #60a0b0; font-weight: bold; font-style: italic; } 
+code span.do { color: #ba2121; font-style: italic; } 
+code span.dt { color: #902000; } 
+code span.dv { color: #40a070; } 
+code span.er { color: #ff0000; font-weight: bold; } 
+code span.ex { } 
+code span.fl { color: #40a070; } 
+code span.fu { color: #06287e; } 
+code span.im { color: #008000; font-weight: bold; } 
+code span.in { color: #60a0b0; font-weight: bold; font-style: italic; } 
+code span.kw { color: #007020; font-weight: bold; } 
+code span.op { color: #666666; } 
+code span.ot { color: #007020; } 
+code span.pp { color: #bc7a00; } 
+code span.sc { color: #4070a0; } 
+code span.ss { color: #bb6688; } 
+code span.st { color: #4070a0; } 
+code span.va { color: #19177c; } 
+code span.vs { color: #4070a0; } 
+code span.wa { color: #60a0b0; font-weight: bold; font-style: italic; } 
+</style>
+<script>
+// apply pandoc div.sourceCode style to pre.sourceCode instead
+(function() {
+  var sheets = document.styleSheets;
+  for (var i = 0; i < sheets.length; i++) {
+    if (sheets[i].ownerNode.dataset["origin"] !== "pandoc") continue;
+    try { var rules = sheets[i].cssRules; } catch (e) { continue; }
+    var j = 0;
+    while (j < rules.length) {
+      var rule = rules[j];
+      // check if there is a div.sourceCode rule
+      if (rule.type !== rule.STYLE_RULE || rule.selectorText !== "div.sourceCode") {
+        j++;
+        continue;
+      }
+      var style = rule.style.cssText;
+      // check if color or background-color is set
+      if (rule.style.color === '' && rule.style.backgroundColor === '') {
+        j++;
+        continue;
+      }
+      // replace div.sourceCode by a pre.sourceCode rule
+      sheets[i].deleteRule(j);
+      sheets[i].insertRule('pre.sourceCode{' + style + '}', j);
+    }
+  }
+})();
+</script>
+
+
+
+
+<style type="text/css">body {
+background-color: #fff;
+margin: 1em auto;
+max-width: 700px;
+overflow: visible;
+padding-left: 2em;
+padding-right: 2em;
+font-family: "Open Sans", "Helvetica Neue", Helvetica, Arial, sans-serif;
+font-size: 14px;
+line-height: 1.35;
+}
+#TOC {
+clear: both;
+margin: 0 0 10px 10px;
+padding: 4px;
+width: 400px;
+border: 1px solid #CCCCCC;
+border-radius: 5px;
+background-color: #f6f6f6;
+font-size: 13px;
+line-height: 1.3;
+}
+#TOC .toctitle {
+font-weight: bold;
+font-size: 15px;
+margin-left: 5px;
+}
+#TOC ul {
+padding-left: 40px;
+margin-left: -1.5em;
+margin-top: 5px;
+margin-bottom: 5px;
+}
+#TOC ul ul {
+margin-left: -2em;
+}
+#TOC li {
+line-height: 16px;
+}
+table {
+margin: 1em auto;
+border-width: 1px;
+border-color: #DDDDDD;
+border-style: outset;
+border-collapse: collapse;
+}
+table th {
+border-width: 2px;
+padding: 5px;
+border-style: inset;
+}
+table td {
+border-width: 1px;
+border-style: inset;
+line-height: 18px;
+padding: 5px 5px;
+}
+table, table th, table td {
+border-left-style: none;
+border-right-style: none;
+}
+table thead, table tr.even {
+background-color: #f7f7f7;
+}
+p {
+margin: 0.5em 0;
+}
+blockquote {
+background-color: #f6f6f6;
+padding: 0.25em 0.75em;
+}
+hr {
+border-style: solid;
+border: none;
+border-top: 1px solid #777;
+margin: 28px 0;
+}
+dl {
+margin-left: 0;
+}
+dl dd {
+margin-bottom: 13px;
+margin-left: 13px;
+}
+dl dt {
+font-weight: bold;
+}
+ul {
+margin-top: 0;
+}
+ul li {
+list-style: circle outside;
+}
+ul ul {
+margin-bottom: 0;
+}
+pre, code {
+background-color: #f7f7f7;
+border-radius: 3px;
+color: #333;
+white-space: pre-wrap; 
+}
+pre {
+border-radius: 3px;
+margin: 5px 0px 10px 0px;
+padding: 10px;
+}
+pre:not([class]) {
+background-color: #f7f7f7;
+}
+code {
+font-family: Consolas, Monaco, 'Courier New', monospace;
+font-size: 85%;
+}
+p > code, li > code {
+padding: 2px 0px;
+}
+div.figure {
+text-align: center;
+}
+img {
+background-color: #FFFFFF;
+padding: 2px;
+border: 1px solid #DDDDDD;
+border-radius: 3px;
+border: 1px solid #CCCCCC;
+margin: 0 5px;
+}
+h1 {
+margin-top: 0;
+font-size: 35px;
+line-height: 40px;
+}
+h2 {
+border-bottom: 4px solid #f7f7f7;
+padding-top: 10px;
+padding-bottom: 2px;
+font-size: 145%;
+}
+h3 {
+border-bottom: 2px solid #f7f7f7;
+padding-top: 10px;
+font-size: 120%;
+}
+h4 {
+border-bottom: 1px solid #f7f7f7;
+margin-left: 8px;
+font-size: 105%;
+}
+h5, h6 {
+border-bottom: 1px solid #ccc;
+font-size: 105%;
+}
+a {
+color: #0033dd;
+text-decoration: none;
+}
+a:hover {
+color: #6666ff; }
+a:visited {
+color: #800080; }
+a:visited:hover {
+color: #BB00BB; }
+a[href^="http:"] {
+text-decoration: underline; }
+a[href^="https:"] {
+text-decoration: underline; }
+
+code > span.kw { color: #555; font-weight: bold; } 
+code > span.dt { color: #902000; } 
+code > span.dv { color: #40a070; } 
+code > span.bn { color: #d14; } 
+code > span.fl { color: #d14; } 
+code > span.ch { color: #d14; } 
+code > span.st { color: #d14; } 
+code > span.co { color: #888888; font-style: italic; } 
+code > span.ot { color: #007020; } 
+code > span.al { color: #ff0000; font-weight: bold; } 
+code > span.fu { color: #900; font-weight: bold; } 
+code > span.er { color: #a61717; background-color: #e3d2d2; } 
+</style>
+
+
+
+
+</head>
+
+<body>
+
+
+
+
+<h1 class="title toc-ignore">Qualitative Coding</h1>
+
+
+
+<p>Codes from a codebook are assigned to units of text, then inter-coder
+agreement is measured. AI supplies suggestions; a human confirms,
+corrects, or rejects each one, and only reviewed rows are exported.</p>
+<p>Steps that call an AI provider are shown as code rather than run. The
+rest run on synthetic data.</p>
+<div class="sourceCode" id="cb1"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb1-1"><a href="#cb1-1" tabindex="-1"></a><span class="fu">library</span>(TextAnalysisR)</span></code></pre></div>
+<div id="codebook" class="section level2">
+<h2>Codebook</h2>
+<p>A data frame with <code>code</code> and <code>definition</code>, plus
+an optional <code>example</code>.</p>
+<div class="sourceCode" id="cb2"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb2-1"><a href="#cb2-1" tabindex="-1"></a>codebook <span class="ot">&lt;-</span> tibble<span class="sc">::</span><span class="fu">tibble</span>(</span>
+<span id="cb2-2"><a href="#cb2-2" tabindex="-1"></a>  <span class="at">code =</span> <span class="fu">c</span>(<span class="st">&quot;access&quot;</span>, <span class="st">&quot;instruction&quot;</span>, <span class="st">&quot;assessment&quot;</span>),</span>
+<span id="cb2-3"><a href="#cb2-3" tabindex="-1"></a>  <span class="at">definition =</span> <span class="fu">c</span>(</span>
+<span id="cb2-4"><a href="#cb2-4" tabindex="-1"></a>    <span class="st">&quot;Availability of technology, materials, or services to students&quot;</span>,</span>
+<span id="cb2-5"><a href="#cb2-5" tabindex="-1"></a>    <span class="st">&quot;Teaching methods, strategies, or curriculum delivery&quot;</span>,</span>
+<span id="cb2-6"><a href="#cb2-6" tabindex="-1"></a>    <span class="st">&quot;Measurement of student performance or progress&quot;</span></span>
+<span id="cb2-7"><a href="#cb2-7" tabindex="-1"></a>  ),</span>
+<span id="cb2-8"><a href="#cb2-8" tabindex="-1"></a>  <span class="at">example =</span> <span class="fu">c</span>(</span>
+<span id="cb2-9"><a href="#cb2-9" tabindex="-1"></a>    <span class="st">&quot;tablets were provided to every student&quot;</span>,</span>
+<span id="cb2-10"><a href="#cb2-10" tabindex="-1"></a>    <span class="st">&quot;the teacher modeled each step before practice&quot;</span>,</span>
+<span id="cb2-11"><a href="#cb2-11" tabindex="-1"></a>    <span class="st">&quot;progress was measured with weekly probes&quot;</span></span>
+<span id="cb2-12"><a href="#cb2-12" tabindex="-1"></a>  )</span>
+<span id="cb2-13"><a href="#cb2-13" tabindex="-1"></a>)</span>
+<span id="cb2-14"><a href="#cb2-14" tabindex="-1"></a>codebook</span></code></pre></div>
+<pre><code>## # A tibble: 3 × 3
+##   code        definition                                                 example
+##   &lt;chr&gt;       &lt;chr&gt;                                                      &lt;chr&gt;  
+## 1 access      Availability of technology, materials, or services to stu… tablet…
+## 2 instruction Teaching methods, strategies, or curriculum delivery       the te…
+## 3 assessment  Measurement of student performance or progress             progre…</code></pre>
+</div>
+<div id="ai-coding" class="section level2">
+<h2>AI Coding</h2>
+<p><code>apply_codes()</code> splits each document into units, sends
+each unit with the codebook, and returns one row per unit-code pair.</p>
+<div class="sourceCode" id="cb4"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb4-1"><a href="#cb4-1" tabindex="-1"></a>texts <span class="ot">&lt;-</span> SpecialEduTech<span class="sc">$</span>abstract[<span class="dv">1</span><span class="sc">:</span><span class="dv">20</span>]</span>
+<span id="cb4-2"><a href="#cb4-2" tabindex="-1"></a><span class="fu">names</span>(texts) <span class="ot">&lt;-</span> <span class="fu">paste0</span>(<span class="st">&quot;doc&quot;</span>, <span class="fu">seq_along</span>(texts))</span>
+<span id="cb4-3"><a href="#cb4-3" tabindex="-1"></a></span>
+<span id="cb4-4"><a href="#cb4-4" tabindex="-1"></a>suggestions <span class="ot">&lt;-</span> <span class="fu">apply_codes</span>(</span>
+<span id="cb4-5"><a href="#cb4-5" tabindex="-1"></a>  texts,</span>
+<span id="cb4-6"><a href="#cb4-6" tabindex="-1"></a>  codebook,</span>
+<span id="cb4-7"><a href="#cb4-7" tabindex="-1"></a>  <span class="at">unit =</span> <span class="st">&quot;paragraph&quot;</span>,</span>
+<span id="cb4-8"><a href="#cb4-8" tabindex="-1"></a>  <span class="at">max_codes =</span> <span class="dv">3</span>,</span>
+<span id="cb4-9"><a href="#cb4-9" tabindex="-1"></a>  <span class="at">provider =</span> <span class="st">&quot;gemini&quot;</span></span>
+<span id="cb4-10"><a href="#cb4-10" tabindex="-1"></a>)</span></code></pre></div>
+<table>
+<colgroup>
+<col width="55%" />
+<col width="44%" />
+</colgroup>
+<thead>
+<tr class="header">
+<th>Argument</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><code>unit</code></td>
+<td>Splits on sentences, paragraphs, or whole documents. Paragraph is
+the usual unit of analysis.</td>
+</tr>
+<tr class="even">
+<td><code>max_codes</code></td>
+<td>Allows a unit to carry none, one, or several codes. A unit that fits
+nothing returns <code>NA</code>.</td>
+</tr>
+<tr class="odd">
+<td><code>provider</code></td>
+<td>Selects OpenAI or Gemini. <code>auto</code> picks whichever key is
+available.</td>
+</tr>
+</tbody>
+</table>
+<p>Columns <code>start</code> and <code>end</code> give character
+offsets of the unit inside its document.</p>
+</div>
+<div id="review" class="section level2">
+<h2>Review</h2>
+<p>Only accepted and edited rows reach the export.</p>
+<div class="sourceCode" id="cb5"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb5-1"><a href="#cb5-1" tabindex="-1"></a>review <span class="ot">&lt;-</span> <span class="fu">subset</span>(suggestions, status <span class="sc">==</span> <span class="st">&quot;ok&quot;</span>)</span>
+<span id="cb5-2"><a href="#cb5-2" tabindex="-1"></a>review<span class="sc">$</span>coder <span class="ot">&lt;-</span> <span class="st">&quot;coder1&quot;</span></span></code></pre></div>
+<p><code>code_retest()</code> codes the same sample more than once and
+reports how often the runs agree, next to a baseline from shuffled
+labels.</p>
+<div class="sourceCode" id="cb6"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb6-1"><a href="#cb6-1" tabindex="-1"></a>stability <span class="ot">&lt;-</span> <span class="fu">code_retest</span>(texts, codebook, <span class="at">n_runs =</span> <span class="dv">2</span>, <span class="at">sample_n =</span> <span class="dv">20</span>)</span>
+<span id="cb6-2"><a href="#cb6-2" tabindex="-1"></a>stability<span class="sc">$</span>summary</span></code></pre></div>
+<p><code>uncoded_units()</code> returns the units that received no code,
+with the text sliced from the recorded offsets.</p>
+<div class="sourceCode" id="cb7"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb7-1"><a href="#cb7-1" tabindex="-1"></a><span class="co"># synthetic units, paraphrased from the corpus</span></span>
+<span id="cb7-2"><a href="#cb7-2" tabindex="-1"></a>suggestions <span class="ot">&lt;-</span> tibble<span class="sc">::</span><span class="fu">tibble</span>(</span>
+<span id="cb7-3"><a href="#cb7-3" tabindex="-1"></a>  <span class="at">doc_id  =</span> <span class="fu">c</span>(<span class="st">&quot;d1&quot;</span>, <span class="st">&quot;d1&quot;</span>, <span class="st">&quot;d2&quot;</span>),</span>
+<span id="cb7-4"><a href="#cb7-4" tabindex="-1"></a>  <span class="at">unit_id =</span> <span class="fu">c</span>(<span class="st">&quot;d1.1&quot;</span>, <span class="st">&quot;d1.2&quot;</span>, <span class="st">&quot;d2.1&quot;</span>),</span>
+<span id="cb7-5"><a href="#cb7-5" tabindex="-1"></a>  <span class="at">start   =</span> <span class="fu">c</span>(<span class="dv">1</span><span class="dt">L</span>, <span class="dv">68</span><span class="dt">L</span>, <span class="dv">1</span><span class="dt">L</span>),</span>
+<span id="cb7-6"><a href="#cb7-6" tabindex="-1"></a>  <span class="at">end     =</span> <span class="fu">c</span>(<span class="dv">66</span><span class="dt">L</span>, <span class="dv">128</span><span class="dt">L</span>, <span class="dv">74</span><span class="dt">L</span>),</span>
+<span id="cb7-7"><a href="#cb7-7" tabindex="-1"></a>  <span class="at">code    =</span> <span class="fu">c</span>(<span class="st">&quot;access&quot;</span>, <span class="cn">NA_character_</span>, <span class="cn">NA_character_</span>)</span>
+<span id="cb7-8"><a href="#cb7-8" tabindex="-1"></a>)</span>
+<span id="cb7-9"><a href="#cb7-9" tabindex="-1"></a></span>
+<span id="cb7-10"><a href="#cb7-10" tabindex="-1"></a>texts <span class="ot">&lt;-</span> <span class="fu">c</span>(</span>
+<span id="cb7-11"><a href="#cb7-11" tabindex="-1"></a>  <span class="at">d1 =</span> <span class="fu">paste</span>(<span class="st">&quot;Text-to-speech tools give students access to grade-level readings.&quot;</span>,</span>
+<span id="cb7-12"><a href="#cb7-12" tabindex="-1"></a>             <span class="st">&quot;Teachers report growing confidence after the training series.&quot;</span>),</span>
+<span id="cb7-13"><a href="#cb7-13" tabindex="-1"></a>  <span class="at">d2 =</span> <span class="st">&quot;The review summarizes methodological features across the included studies.&quot;</span></span>
+<span id="cb7-14"><a href="#cb7-14" tabindex="-1"></a>)</span>
+<span id="cb7-15"><a href="#cb7-15" tabindex="-1"></a></span>
+<span id="cb7-16"><a href="#cb7-16" tabindex="-1"></a><span class="fu">uncoded_units</span>(suggestions, texts)</span></code></pre></div>
+<pre><code>## # A tibble: 2 × 5
+##   doc_id unit_id start   end unit_text                                          
+##   &lt;chr&gt;  &lt;chr&gt;   &lt;int&gt; &lt;int&gt; &lt;chr&gt;                                              
+## 1 d1     d1.2       68   128 Teachers report growing confidence after the train…
+## 2 d2     d2.1        1    74 The review summarizes methodological features acro…</code></pre>
+</div>
+<div id="agreement" class="section level2">
+<h2>Agreement</h2>
+<p><code>code_agreement()</code> takes assignments from two or more
+coders.</p>
+<div class="sourceCode" id="cb9"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb9-1"><a href="#cb9-1" tabindex="-1"></a><span class="co"># synthetic assignments</span></span>
+<span id="cb9-2"><a href="#cb9-2" tabindex="-1"></a>assignments <span class="ot">&lt;-</span> tibble<span class="sc">::</span><span class="fu">tibble</span>(</span>
+<span id="cb9-3"><a href="#cb9-3" tabindex="-1"></a>  <span class="at">doc_id =</span> <span class="fu">rep</span>(<span class="fu">paste0</span>(<span class="st">&quot;doc&quot;</span>, <span class="dv">1</span><span class="sc">:</span><span class="dv">10</span>), <span class="at">each =</span> <span class="dv">2</span>),</span>
+<span id="cb9-4"><a href="#cb9-4" tabindex="-1"></a>  <span class="at">code   =</span> <span class="fu">c</span>(<span class="st">&quot;access&quot;</span>, <span class="st">&quot;access&quot;</span>, <span class="st">&quot;access&quot;</span>, <span class="st">&quot;access&quot;</span>, <span class="st">&quot;access&quot;</span>, <span class="st">&quot;access&quot;</span>,</span>
+<span id="cb9-5"><a href="#cb9-5" tabindex="-1"></a>             <span class="st">&quot;instruction&quot;</span>, <span class="st">&quot;instruction&quot;</span>, <span class="st">&quot;instruction&quot;</span>, <span class="st">&quot;instruction&quot;</span>,</span>
+<span id="cb9-6"><a href="#cb9-6" tabindex="-1"></a>             <span class="st">&quot;instruction&quot;</span>, <span class="st">&quot;assessment&quot;</span>, <span class="st">&quot;assessment&quot;</span>, <span class="st">&quot;assessment&quot;</span>,</span>
+<span id="cb9-7"><a href="#cb9-7" tabindex="-1"></a>             <span class="st">&quot;assessment&quot;</span>, <span class="st">&quot;assessment&quot;</span>, <span class="st">&quot;assessment&quot;</span>, <span class="st">&quot;access&quot;</span>,</span>
+<span id="cb9-8"><a href="#cb9-8" tabindex="-1"></a>             <span class="st">&quot;access&quot;</span>, <span class="st">&quot;access&quot;</span>),</span>
+<span id="cb9-9"><a href="#cb9-9" tabindex="-1"></a>  <span class="at">coder  =</span> <span class="fu">rep</span>(<span class="fu">c</span>(<span class="st">&quot;c1&quot;</span>, <span class="st">&quot;c2&quot;</span>), <span class="at">times =</span> <span class="dv">10</span>)</span>
+<span id="cb9-10"><a href="#cb9-10" tabindex="-1"></a>)</span>
+<span id="cb9-11"><a href="#cb9-11" tabindex="-1"></a></span>
+<span id="cb9-12"><a href="#cb9-12" tabindex="-1"></a>agreement <span class="ot">&lt;-</span> <span class="fu">code_agreement</span>(assignments)</span>
+<span id="cb9-13"><a href="#cb9-13" tabindex="-1"></a>agreement<span class="sc">$</span>overall</span></code></pre></div>
+<pre><code>## # A tibble: 5 × 3
+##   metric  estimate     n
+##   &lt;chr&gt;      &lt;dbl&gt; &lt;int&gt;
+## 1 percent    0.8      10
+## 2 pabak      0.6      10
+## 3 ac1        0.705    10
+## 4 kappa      0.692    10
+## 5 alpha      0.705    10</code></pre>
+<p><code>n</code> is how many units each statistic used.</p>
+<table>
+<colgroup>
+<col width="50%" />
+<col width="50%" />
+</colgroup>
+<thead>
+<tr class="header">
+<th><code>metric</code></th>
+<th>Reads as</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><code>percent</code></td>
+<td>Raw share of units both coders labeled identically. No correction
+for chance.</td>
+</tr>
+<tr class="even">
+<td><code>pabak</code></td>
+<td>Prevalence-adjusted bias-adjusted kappa: percent agreement rescaled
+to the -1 to 1 range.</td>
+</tr>
+<tr class="odd">
+<td><code>ac1</code></td>
+<td>Gwet’s agreement coefficient. Chance-corrected, stable when one code
+dominates.</td>
+</tr>
+<tr class="even">
+<td><code>kappa</code></td>
+<td>Cohen’s kappa for two coders, Fleiss’ for more. Chance-corrected
+against observed marginals.</td>
+</tr>
+<tr class="odd">
+<td><code>alpha</code></td>
+<td>Krippendorff’s alpha. Chance-corrected, handles missing units.</td>
+</tr>
+</tbody>
+</table>
+<p>Which units the coders differed on:</p>
+<div class="sourceCode" id="cb11"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb11-1"><a href="#cb11-1" tabindex="-1"></a>agreement<span class="sc">$</span>disagree</span></code></pre></div>
+<pre><code>## # A tibble: 2 × 3
+##   doc_id c1          c2        
+##   &lt;chr&gt;  &lt;chr&gt;       &lt;chr&gt;     
+## 1 doc6   instruction assessment
+## 2 doc9   assessment  access</code></pre>
+<p>Which codes carry those disagreements:</p>
+<div class="sourceCode" id="cb13"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb13-1"><a href="#cb13-1" tabindex="-1"></a>agreement<span class="sc">$</span>by_code</span></code></pre></div>
+<pre><code>## # A tibble: 15 × 4
+##    code        metric  estimate     n
+##    &lt;chr&gt;       &lt;chr&gt;      &lt;dbl&gt; &lt;int&gt;
+##  1 access      percent    0.9      10
+##  2 access      pabak      0.8      10
+##  3 access      ac1        0.802    10
+##  4 access      kappa      0.8      10
+##  5 access      alpha      0.808    10
+##  6 assessment  percent    0.8      10
+##  7 assessment  pabak      0.6      10
+##  8 assessment  ac1        0.655    10
+##  9 assessment  kappa      0.524    10
+## 10 assessment  alpha      0.548    10
+## 11 instruction percent    0.9      10
+## 12 instruction pabak      0.8      10
+## 13 instruction ac1        0.84     10
+## 14 instruction kappa      0.737    10
+## 15 instruction alpha      0.747    10</code></pre>
+<p>Each code is scored as a yes/no indicator, so a two-code corpus
+returns the same figures twice, one indicator being the other’s
+complement.</p>
+<p>Chance-corrected statistics turn negative when observed agreement
+falls below what the marginals predict, which happens when nearly every
+unit carries the same code:</p>
+<div class="sourceCode" id="cb15"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb15-1"><a href="#cb15-1" tabindex="-1"></a><span class="co"># synthetic assignments, one code dominating</span></span>
+<span id="cb15-2"><a href="#cb15-2" tabindex="-1"></a>skewed <span class="ot">&lt;-</span> tibble<span class="sc">::</span><span class="fu">tibble</span>(</span>
+<span id="cb15-3"><a href="#cb15-3" tabindex="-1"></a>  <span class="at">doc_id =</span> <span class="fu">rep</span>(<span class="fu">paste0</span>(<span class="st">&quot;doc&quot;</span>, <span class="dv">1</span><span class="sc">:</span><span class="dv">8</span>), <span class="at">each =</span> <span class="dv">2</span>),</span>
+<span id="cb15-4"><a href="#cb15-4" tabindex="-1"></a>  <span class="at">code   =</span> <span class="fu">c</span>(<span class="st">&quot;access&quot;</span>, <span class="st">&quot;access&quot;</span>, <span class="st">&quot;access&quot;</span>, <span class="st">&quot;access&quot;</span>, <span class="st">&quot;access&quot;</span>, <span class="st">&quot;access&quot;</span>,</span>
+<span id="cb15-5"><a href="#cb15-5" tabindex="-1"></a>             <span class="st">&quot;access&quot;</span>, <span class="st">&quot;access&quot;</span>, <span class="st">&quot;access&quot;</span>, <span class="st">&quot;access&quot;</span>, <span class="st">&quot;access&quot;</span>, <span class="st">&quot;access&quot;</span>,</span>
+<span id="cb15-6"><a href="#cb15-6" tabindex="-1"></a>             <span class="st">&quot;access&quot;</span>, <span class="st">&quot;instruction&quot;</span>, <span class="st">&quot;instruction&quot;</span>, <span class="st">&quot;access&quot;</span>),</span>
+<span id="cb15-7"><a href="#cb15-7" tabindex="-1"></a>  <span class="at">coder  =</span> <span class="fu">rep</span>(<span class="fu">c</span>(<span class="st">&quot;c1&quot;</span>, <span class="st">&quot;c2&quot;</span>), <span class="at">times =</span> <span class="dv">8</span>)</span>
+<span id="cb15-8"><a href="#cb15-8" tabindex="-1"></a>)</span>
+<span id="cb15-9"><a href="#cb15-9" tabindex="-1"></a></span>
+<span id="cb15-10"><a href="#cb15-10" tabindex="-1"></a><span class="fu">code_agreement</span>(skewed, <span class="at">by_code =</span> <span class="cn">FALSE</span>)<span class="sc">$</span>overall</span></code></pre></div>
+<pre><code>## # A tibble: 5 × 3
+##   metric  estimate     n
+##   &lt;chr&gt;      &lt;dbl&gt; &lt;int&gt;
+## 1 percent   0.75       8
+## 2 pabak     0.5        8
+## 3 ac1       0.68       8
+## 4 kappa    -0.143      8
+## 5 alpha    -0.0714     8</code></pre>
+<p>Chance alone accounts for 0.78 against an observed 0.75, so
+<code>kappa</code> lands at -0.14. Only <code>percent</code> is bounded
+at zero.</p>
+<p><code>codebook_authors</code> adds an <code>independent</code> table
+computed among the remaining coders alone.</p>
+<div class="sourceCode" id="cb17"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb17-1"><a href="#cb17-1" tabindex="-1"></a><span class="fu">code_agreement</span>(assignments, <span class="at">codebook_authors =</span> <span class="st">&quot;c1&quot;</span>)<span class="sc">$</span>independent</span></code></pre></div>
+<p>Everything above assumes coders shared units. When each coder
+highlights their own stretch of text, <code>align = &quot;coverage&quot;</code>
+compares the highlights instead. <code>start</code> and <code>end</code>
+are character positions.</p>
+<div class="sourceCode" id="cb18"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb18-1"><a href="#cb18-1" tabindex="-1"></a><span class="co"># synthetic spans</span></span>
+<span id="cb18-2"><a href="#cb18-2" tabindex="-1"></a>spans <span class="ot">&lt;-</span> tibble<span class="sc">::</span><span class="fu">tibble</span>(</span>
+<span id="cb18-3"><a href="#cb18-3" tabindex="-1"></a>  <span class="at">doc_id =</span> <span class="fu">c</span>(<span class="st">&quot;doc1&quot;</span>, <span class="st">&quot;doc1&quot;</span>, <span class="st">&quot;doc1&quot;</span>),</span>
+<span id="cb18-4"><a href="#cb18-4" tabindex="-1"></a>  <span class="at">coder  =</span> <span class="fu">c</span>(<span class="st">&quot;c1&quot;</span>, <span class="st">&quot;c1&quot;</span>, <span class="st">&quot;c2&quot;</span>),</span>
+<span id="cb18-5"><a href="#cb18-5" tabindex="-1"></a>  <span class="at">code   =</span> <span class="fu">c</span>(<span class="st">&quot;access&quot;</span>, <span class="st">&quot;instruction&quot;</span>, <span class="st">&quot;access&quot;</span>),</span>
+<span id="cb18-6"><a href="#cb18-6" tabindex="-1"></a>  <span class="at">start  =</span> <span class="fu">c</span>(<span class="dv">1</span>, <span class="dv">200</span>, <span class="dv">50</span>),</span>
+<span id="cb18-7"><a href="#cb18-7" tabindex="-1"></a>  <span class="at">end    =</span> <span class="fu">c</span>(<span class="dv">100</span>, <span class="dv">300</span>, <span class="dv">80</span>)</span>
+<span id="cb18-8"><a href="#cb18-8" tabindex="-1"></a>)</span>
+<span id="cb18-9"><a href="#cb18-9" tabindex="-1"></a></span>
+<span id="cb18-10"><a href="#cb18-10" tabindex="-1"></a><span class="fu">code_agreement</span>(spans, <span class="at">align =</span> <span class="st">&quot;coverage&quot;</span>)<span class="sc">$</span>overall</span></code></pre></div>
+<pre><code>## # A tibble: 2 × 5
+##   coder other metric   estimate     n
+##   &lt;chr&gt; &lt;chr&gt; &lt;chr&gt;       &lt;dbl&gt; &lt;int&gt;
+## 1 c1    c2    coverage      0.5     2
+## 2 c2    c1    coverage      1       1</code></pre>
+<p><code>c2</code>’s span sits inside <code>c1</code>’s first one. One
+of <code>c1</code>’s two spans was matched, so 0.50; <code>c2</code>’s
+only span was matched, so 1.00. Both directions are reported.</p>
+</div>
+<div id="combining-coder-files" class="section level2">
+<h2>Combining Coder Files</h2>
+<div class="sourceCode" id="cb20"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb20-1"><a href="#cb20-1" tabindex="-1"></a>combined <span class="ot">&lt;-</span> <span class="fu">merge_codes</span>(<span class="fu">c</span>(<span class="st">&quot;coder1.csv&quot;</span>, <span class="st">&quot;coder2.xlsx&quot;</span>))</span>
+<span id="cb20-2"><a href="#cb20-2" tabindex="-1"></a><span class="fu">code_agreement</span>(combined)<span class="sc">$</span>overall</span></code></pre></div>
+</div>
+
+
+
+<!-- code folding -->
+
+
+<!-- dynamically load mathjax for compatibility with self-contained -->
+<script>
+  (function () {
+    var script = document.createElement("script");
+    script.type = "text/javascript";
+    script.src  = "https://mathjax.rstudio.com/latest/MathJax.js?config=TeX-AMS-MML_HTMLorMML";
+    document.getElementsByTagName("head")[0].appendChild(script);
+  })();
+</script>
+
+</body>
+</html>

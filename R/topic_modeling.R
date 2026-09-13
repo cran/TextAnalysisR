@@ -16,6 +16,183 @@ utils::globalVariables(c("K", "metric", "value", "label", "hover_text"))
   }
 }
 
+.build_covariate_formula <- function(terms) {
+  f <- stats::as.formula(paste("~", paste(terms, collapse = " + ")))
+  environment(f) <- list2env(list(s = stm::s), parent = globalenv())
+  f
+}
+
+.validate_custom_formula <- function(rhs, allowed_vars) {
+  rhs <- sub("^\\s*~\\s*", "", trimws(rhs))
+  if (!nzchar(rhs)) return("empty formula")
+  expr <- tryCatch(str2lang(paste("~", rhs)), error = function(e) NULL)
+  if (is.null(expr)) return("could not parse the formula")
+  allowed_funs <- c("~", "+", "-", "*", "/", ":", "^", "(", "c",
+                    ">", "<", ">=", "<=", "==", "!=",
+                    "I", "s", "ns", "bs", "poly", "factor",
+                    "log", "log2", "log10", "sqrt", "exp")
+  bad <- character(0)
+  walk <- function(e) {
+    if (is.call(e)) {
+      fn <- e[[1]]
+      nm <- if (is.symbol(fn)) as.character(fn) else deparse(fn)
+      if (!nm %in% allowed_funs) bad[[length(bad) + 1]] <<- nm
+      for (i in seq_along(e)[-1]) walk(e[[i]])
+    } else if (is.symbol(e)) {
+      nm <- as.character(e)
+      if (!nm %in% allowed_vars && !nm %in% allowed_funs) bad[[length(bad) + 1]] <<- nm
+    }
+    invisible(NULL)
+  }
+  walk(expr)
+  bad <- unique(bad)
+  if (length(bad) > 0) return(paste0("not allowed: ", paste(bad, collapse = ", ")))
+  NULL
+}
+
+.rmvn <- function(n, mu, Sigma) {
+  E <- matrix(stats::rnorm(n * length(mu)), n, length(mu))
+  t(t(E %*% chol(Sigma)) + mu)
+}
+
+.effect_design_matrix <- function(formula, orig_data, new_data) {
+  tt <- stats::delete.response(stats::terms(formula, data = orig_data))
+  mf <- stats::model.frame(tt, orig_data)
+  mt <- attr(mf, "terms")
+  contrasts <- attr(stats::model.matrix(mt, mf), "contrasts")
+  xlevels <- stats::.getXlevels(mt, mf)
+  new_mf <- stats::model.frame(mt, new_data, xlev = xlevels)
+  stats::model.matrix(mt, new_mf, contrasts.arg = contrasts)
+}
+
+.hpd <- function(x, ci = 0.95) {
+  x <- sort(x)
+  n <- length(x)
+  k <- max(1L, floor(ci * n))
+  w <- x[seq(k, n)] - x[seq_len(n - k + 1L)]
+  i <- which.min(w)
+  c(x[i], x[i + k - 1L])
+}
+
+.effect_interval <- function(x, interval, ci) {
+  if (interval == "hpd") .hpd(x, ci)
+  else stats::quantile(x, c((1 - ci) / 2, 1 - (1 - ci) / 2), names = FALSE)
+}
+
+.beta_formula <- function(rhs_formula) {
+  rhs <- paste(deparse(rhs_formula[[length(rhs_formula)]]), collapse = " ")
+  f <- stats::as.formula(paste("y ~", rhs))
+  environment(f) <- list2env(list(s = stm::s), parent = globalenv())
+  f
+}
+
+.reference_level <- function(col) {
+  if (is.numeric(col)) return(stats::median(col, na.rm = TRUE))
+  tab <- table(col)
+  factor(names(tab)[which.max(tab)], levels = levels(as.factor(col)))
+}
+
+.summarize_effect <- function(mat, topic, value_col, interval, ci) {
+  ints <- t(apply(mat, 1, .effect_interval, interval = interval, ci = ci))
+  data.frame(topic = topic, value = value_col,
+             proportion = rowMeans(mat), lower = ints[, 1], upper = ints[, 2],
+             stringsAsFactors = FALSE)
+}
+
+#' Estimate topic prevalence effects from an STM model
+#'
+#' Estimates how a document-level covariate shifts topic prevalence, returning a
+#' tidy data frame of per-topic estimates with intervals.
+#'
+#' @param estimates An \code{estimateEffect} object from \code{stm::estimateEffect}.
+#' @param variable Name of the covariate to evaluate.
+#' @param type "pointestimate" for a categorical covariate or "continuous" for a numeric one.
+#' @param method "stm" (method of composition, default) or "beta" (bounded per-topic Beta regression).
+#' @param interval "eti" equal-tailed (default for "stm") or "hpd" highest-posterior-density (default for "beta").
+#' @param model Fitted \code{stm} model; required for \code{method = "beta"}.
+#' @param documents Document list passed to \code{stm}; required for \code{method = "beta"}.
+#' @param npoints Grid resolution for a continuous covariate (default 100).
+#' @param nsims Posterior draws (default 100; 25 for \code{method = "beta"}).
+#' @param ci Interval width (default 0.95).
+#'
+#' @return A data frame with columns topic, value, proportion, lower, and upper.
+#'
+#' @concept topic-modeling
+#' @export
+estimate_topic_effects <- function(estimates, variable,
+                                   type = c("pointestimate", "continuous"),
+                                   method = c("stm", "beta"),
+                                   interval = NULL,
+                                   model = NULL, documents = NULL,
+                                   npoints = 100, nsims = 100, ci = 0.95) {
+  type <- match.arg(type)
+  method <- match.arg(method)
+  if (method == "beta" && missing(nsims)) nsims <- 25L
+  if (is.null(interval)) interval <- if (method == "stm") "eti" else "hpd"
+  interval <- match.arg(interval, c("eti", "hpd"))
+
+  data <- estimates$data
+  varlist <- estimates$varlist
+  formula <- estimates$formula
+  if (!variable %in% varlist) stop("Covariate '", variable, "' is not in the effect model.")
+
+  vtype <- class(data[[variable]])[1]
+  controls <- setdiff(varlist, variable)
+
+  if (type == "pointestimate") {
+    vals <- unique(data[[variable]])
+    cdata <- data.frame(if (vtype == "character") factor(vals) else vals)
+  } else {
+    if (vtype %in% c("character", "factor")) stop("A continuous effect needs a numeric covariate.")
+    vals <- seq(min(data[[variable]], na.rm = TRUE), max(data[[variable]], na.rm = TRUE), length.out = npoints)
+    cdata <- data.frame(vals)
+  }
+  names(cdata) <- variable
+
+  for (cv in controls) cdata[[cv]] <- .reference_level(data[[cv]])
+
+  cmatrix <- .effect_design_matrix(formula, data, cdata)
+  topics <- estimates$topics
+  value_col <- if (type == "pointestimate") as.character(vals) else as.numeric(vals)
+
+  if (method == "stm") {
+    res <- lapply(seq_along(topics), function(i) {
+      betas <- do.call(rbind, lapply(estimates$parameters[[i]], function(p) .rmvn(nsims, p$est, p$vcov)))
+      sims <- cmatrix %*% t(betas)
+      .summarize_effect(sims, topics[i], value_col, interval, ci)
+    })
+    return(do.call(rbind, res))
+  }
+
+  if (is.null(model) || is.null(documents))
+    stop("method = 'beta' needs `model` (the fitted stm object) and `documents`.")
+  if (!requireNamespace("betareg", quietly = TRUE))
+    stop("method = 'beta' requires the 'betareg' package. Install it with install.packages('betareg').")
+
+  n_topics <- ncol(model$theta)
+  n_docs <- nrow(model$theta)
+  theta_post <- stm::thetaPosterior(model, nsims = nsims, type = "Global", documents = documents)
+  theta_draws <- lapply(seq_len(nsims), function(m) t(vapply(theta_post, function(d) d[m, ], numeric(n_topics))))
+  bform <- .beta_formula(formula)
+  squeeze <- function(y) (y * (n_docs - 1) + 0.5) / n_docs
+
+  res <- lapply(seq_along(topics), function(k) {
+    pooled <- lapply(seq_len(nsims), function(m) {
+      dat <- data
+      dat$y <- squeeze(theta_draws[[m]][, topics[k]])
+      tryCatch({
+        bfit <- suppressWarnings(betareg::betareg(bform, data = dat))
+        betas <- .rmvn(20L, stats::coef(bfit, model = "mean"), stats::vcov(bfit, model = "mean"))
+        stats::plogis(cmatrix %*% t(betas))
+      }, error = function(e) NULL)
+    })
+    P <- do.call(cbind, pooled)
+    if (is.null(P)) return(NULL)
+    .summarize_effect(P, topics[k], value_col, interval, ci)
+  })
+  do.call(rbind, res)
+}
+
 .embedding_silhouette <- function(model) {
   coords <- model$embeddings
   clusters <- model$topic_assignments
@@ -46,11 +223,12 @@ utils::globalVariables(c("K", "metric", "value", "label", "hover_text"))
 #'   Set to higher values for faster searchK on multi-core systems.
 #' @param categorical_var Optional categorical variable(s) for prevalence.
 #' @param continuous_var Optional continuous variable(s) for prevalence.
+#' @param init.type Initialization passed to stm::searchK: "Spectral", "LDA", or "Random" (default: "Spectral").
 #' @param height Plot height in pixels (default: 600).
 #' @param width Plot width in pixels (default: 800).
 #' @param verbose Logical indicating whether to print progress (default: TRUE).
 #' @param ... Additional arguments passed to stm::searchK.
-#' @return A list containing search results and diagnostic plots.
+#' @return A list with the search results, the model call, and the settings used.
 #' @concept topic-modeling
 #' @seealso [plot_quality_metrics()] to visualize topic-count diagnostics; `stm::stm()` to fit the chosen model; [fit_embedding_model()] for an embedding-based alternative to STM
 #' @export
@@ -61,6 +239,7 @@ find_optimal_k <- function(dfm_object,
                            cores = 1,
                            categorical_var = NULL,
                            continuous_var = NULL,
+                           init.type = "Spectral",
                            height = 600,
                            width = 800,
                            verbose = TRUE, ...) {
@@ -89,7 +268,7 @@ find_optimal_k <- function(dfm_object,
     terms <- c(terms, continuous_var)
   }
   prevalence_formula <- if (length(terms) > 0) {
-    as.formula(paste("~", paste(terms, collapse = " + ")))
+    .build_covariate_formula(terms)
   } else {
     NULL
   }
@@ -101,7 +280,7 @@ find_optimal_k <- function(dfm_object,
       max.em.its = max.em.its,
       emtol = emtol,
       cores = cores,
-      init.type = "Spectral",
+      init.type = init.type,
       K = topic_range,
       prevalence = prevalence_formula,
       verbose = verbose,
@@ -628,69 +807,87 @@ calculate_topic_probability <- function(stm_model,
     dplyr::mutate(gamma = round(gamma, 3))
 }
 
-#' @title Neural Topic Modeling
+#' @title Embedding-Based Topic Discovery
 #'
 #' @description
-#' Implements neural topic modeling using deep learning architectures for improved
-#' topic discovery and representation learning.
+#' Groups documents into topics by clustering transformer embeddings, with
+#' per-topic cohesion diagnostics.
 #'
 #' @param texts Character vector of documents
 #' @param n_topics Number of topics to discover
-#' @param hidden_layers Number of hidden layers in neural network
-#' @param hidden_units Number of units per hidden layer
-#' @param dropout_rate Dropout rate for regularization
+#' @param embedding_model Transformer model for initial embeddings
+#' @param clustering_method Algorithm applied to the embedding similarity
+#'   matrix: "kmeans" (default) or "hierarchical". Both honour `n_topics` and
+#'   assign every document.
+#' @param min_topic_size Minimum documents per topic.
+#' @param seed Random seed for reproducibility
+#'
+#' @return List with topic assignments and diagnostics. The cohesion values
+#'   are mean pairwise cosine similarity of document embeddings within each
+#'   topic cluster (embedding-space compactness), not lexical coherence
+#'   measures such as C_v or NPMI.
+#'
+#' @seealso [find_optimal_k()] and [auto_tune_embedding_topics()] for
+#'   choosing `n_topics`; [fit_embedding_model()] for the UMAP and HDBSCAN
+#'   pipeline that derives the topic count from density instead.
+#' @concept topic-modeling
+#' @export
+cluster_embedding_topics <- function(texts, n_topics = 10,
+                                     embedding_model = "all-MiniLM-L6-v2",
+                                     clustering_method = c("kmeans", "hierarchical"),
+                                     min_topic_size = 3,
+                                     seed = 123) {
+  clustering_method <- match.arg(clustering_method)
+  result <- fit_embedding_model(
+    texts = texts,
+    method = "embedding_clustering",
+    n_topics = n_topics,
+    embedding_model = embedding_model,
+    clustering_method = clustering_method,
+    min_topic_size = min_topic_size,
+    seed = seed
+  )
+  cohesion <- tryCatch(
+    calculate_coherence(result$embeddings, result$topic_assignments),
+    error = function(e) NULL
+  )
+  result$method <- "embedding_clustering"
+  result$clustering_method <- clustering_method
+  result$diagnostics <- if (is.null(cohesion)) NULL else list(topic_quality = list(
+    embedding_cohesion = cohesion$coherence_scores,
+    mean_embedding_cohesion = cohesion$mean_coherence
+  ))
+  result
+}
+
+#' @title Neural Topic Modeling (deprecated)
+#'
+#' @description
+#' Deprecated. Use [cluster_embedding_topics()]. The `hidden_layers`,
+#' `hidden_units`, and `dropout_rate` arguments never affected the result
+#' and are ignored.
+#'
+#' @param texts Character vector of documents
+#' @param n_topics Number of topics to discover
+#' @param hidden_layers Ignored.
+#' @param hidden_units Ignored.
+#' @param dropout_rate Ignored.
 #' @param embedding_model Transformer model for initial embeddings
 #' @param seed Random seed for reproducibility
 #'
-#' @return List containing neural topic model and diagnostics
+#' @return See [cluster_embedding_topics()].
 #' @concept topic-modeling
 #' @keywords internal
 #' @export
 run_neural_topics_internal <- function(texts, n_topics = 10, hidden_layers = 2,
-                                           hidden_units = 100, dropout_rate = 0.2,
-                                           embedding_model = "all-MiniLM-L6-v2", seed = 123) {
-
-  tryCatch({
-    base_result <- fit_embedding_model(
-      texts = texts,
-      method = "embedding_clustering",
-      n_topics = n_topics,
-      embedding_model = embedding_model,
-      seed = seed
-    )
-
-    coherence <- calculate_coherence(base_result$embeddings, base_result$topic_assignments)
-
-    diagnostics <- list(
-      architecture = list(
-        hidden_layers = hidden_layers,
-        hidden_units = hidden_units,
-        dropout_rate = dropout_rate
-      ),
-      topic_quality = list(
-        neural_coherence = coherence$coherence_scores,
-        mean_coherence = coherence$mean_coherence
-      )
-    )
-
-    result <- base_result
-    result$method <- "neural_topic_model"
-    result$diagnostics <- diagnostics
-    result$architecture <- list(hidden_layers = hidden_layers,
-                                hidden_units = hidden_units,
-                                dropout_rate = dropout_rate)
-
-    return(result)
-
-  }, error = function(e) {
-    warning("Neural topic modeling failed, falling back to base method: ", e$message)
-    return(fit_embedding_model(texts = texts, method = "embedding_clustering",
-                                   n_topics = n_topics,
-                                 embedding_model = embedding_model, seed = seed))
-  })
+                                       hidden_units = 100, dropout_rate = 0.2,
+                                       embedding_model = "all-MiniLM-L6-v2", seed = 123) {
+  .Deprecated("cluster_embedding_topics")
+  cluster_embedding_topics(texts = texts, n_topics = n_topics,
+                           embedding_model = embedding_model, seed = seed)
 }
 
-#' @title Fit Embedding-based Topic Model
+#' @title Fit Embedding-Based Topic Model
 #'
 #' @description
 #' This function performs embedding-based topic modeling using transformer embeddings
@@ -745,7 +942,7 @@ run_neural_topics_internal <- function(texts, n_topics = 10, hidden_layers = 2,
 #' @param seed Random seed for reproducibility (default: 123).
 #' @param verbose Logical, if TRUE, prints progress messages.
 #' @param precomputed_embeddings Optional matrix of pre-computed document embeddings.
-#'   If provided, skips embedding generation for improved performance. Must have
+#'   If provided, skips embedding generation to avoid recomputation. Must have
 #'   the same number of rows as the length of texts.
 #'
 #' @return A list containing topic assignments, topic keywords, and quality metrics.
@@ -1414,7 +1611,7 @@ fit_embedding_model <- function(texts,
 }
 
 
-#' @title Embedding-based Topic Modeling (Deprecated)
+#' @title Embedding-Based Topic Modeling (Deprecated)
 #' @description
 #' This function is deprecated. Please use [fit_embedding_model()] instead.
 #' @inheritParams fit_embedding_model
@@ -2154,6 +2351,8 @@ generate_semantic_topic_keywords <- function(texts,
           topic_keywords[[as.character(unique_topics[i])]] <- names(scores)[top_idx]
         }
       } else {
+        # dropping NA would desync texts from assignments, so blank them
+        texts[is.na(texts)] <- ""
         doc_tokens <- quanteda::tokens(quanteda::corpus(texts),
                                        remove_punct = TRUE,
                                        remove_numbers = TRUE,
@@ -3152,7 +3351,7 @@ plot_topic_probability <- function(gamma_data,
 #' @param title Plot title (default: "Category Effects")
 #' @param base_font_size Base font size in points for the plot theme (default: 11). Axis text and strip text will be base_font_size + 2.
 #'
-#' @return A plotly object
+#' @return A ggplot object
 #'
 #' @concept topic-modeling
 #' @export
@@ -3181,7 +3380,7 @@ plot_topic_effects_categorical <- function(effects_data,
 
   ggplot_obj <- ggplot2::ggplot(effects_data, ggplot2::aes(x = value, y = proportion, text = hover_text)) +
     ggplot2::facet_wrap(~topic_label, ncol = ncol, scales = "free") +
-    ggplot2::scale_y_continuous(labels = .number_labeller(3)) +
+    ggplot2::scale_y_continuous(labels = .number_labeller(3), n.breaks = 3) +
     ggplot2::xlab("") +
     ggplot2::ylab("Topic proportion") +
     ggplot2::geom_errorbar(
@@ -3226,7 +3425,7 @@ plot_topic_effects_categorical <- function(effects_data,
 #' @param title Plot title (default: "Continuous Variable Effects")
 #' @param base_font_size Base font size in points for the plot theme (default: 11). Axis text and strip text will be base_font_size + 2.
 #'
-#' @return A plotly object
+#' @return A ggplot object
 #'
 #' @concept topic-modeling
 #' @export
@@ -3244,9 +3443,9 @@ plot_topic_effects_continuous <- function(effects_data,
                                    "<br>Value:", round(effects_data$value, 3),
                                    "<br>Proportion:", sprintf("%.3f", effects_data$proportion))
 
-  ggplot_obj <- ggplot2::ggplot(effects_data, ggplot2::aes(x = value, y = proportion, text = hover_text)) +
+  ggplot_obj <- ggplot2::ggplot(effects_data, ggplot2::aes(x = value, y = proportion, text = hover_text, group = topic_label)) +
     ggplot2::facet_wrap(~topic_label, ncol = ncol, scales = "free") +
-    ggplot2::scale_y_continuous(labels = .number_labeller(3)) +
+    ggplot2::scale_y_continuous(labels = .number_labeller(3), n.breaks = 3) +
     ggplot2::geom_ribbon(ggplot2::aes(ymin = lower, ymax = upper), fill = "#337ab7", alpha = 0.2) +
     ggplot2::geom_line(linewidth = 0.5, color = "#337ab7") +
     ggplot2::xlab("") +
@@ -3289,7 +3488,7 @@ plot_topic_effects_continuous <- function(effects_data,
 #' @param height Plot height in pixels (default: 500)
 #' @param width Plot width in pixels (default: NULL for auto)
 #'
-#' @return A plotly object
+#' @return A ggplot object
 #'
 #' @concept visualization
 #' @export

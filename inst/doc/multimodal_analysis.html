@@ -375,10 +375,9 @@ corpus</li>
 <p><code>process_pdf_unified()</code> runs the full pipeline with
 automatic fallback:</p>
 <ol style="list-style-type: decimal">
-<li><strong>Multimodal</strong> (pdftools + vision LLM) – extracts text
-and describes visual content</li>
-<li><strong>Text-only</strong> (pdftools) – fallback when no vision
-provider is set</li>
+<li>Multimodal (pdftools + vision LLM) – extracts text and describes
+visual content</li>
+<li>Text-only (pdftools) – fallback when no vision provider is set</li>
 </ol>
 <p><code>describe_image()</code> describes a single base64-encoded PNG.
 Both require a vision-provider API key (OpenAI/Gemini) and network

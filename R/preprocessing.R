@@ -485,6 +485,31 @@ unite_cols <- function(df, listed_vars) {
 }
 
 
+#' @keywords internal
+.normalize_math_notation <- function(x) {
+  out <- as.character(x)
+  if (length(out) == 0) return(out)
+  na <- is.na(out)
+  out[na] <- ""
+  out <- gsub("\\\\frac\\{([^{}]+)\\}\\{([^{}]+)\\}", "\\1/\\2", out, perl = TRUE)
+  out <- gsub("\\\\sqrt\\{([^{}]+)\\}", "sqrt(\\1)", out, perl = TRUE)
+  out <- gsub("\\^\\{(\\w+)\\}", "^\\1", out, perl = TRUE)
+  out <- gsub("\\^\\((\\w+)\\)", "^\\1", out, perl = TRUE)
+  out <- gsub("\\\\times|\u00d7", "*", out, perl = TRUE)
+  out <- gsub("\\\\cdot", "*", out, perl = TRUE)
+  out <- gsub("\\\\div|\u00f7", "/", out, perl = TRUE)
+  out <- gsub("\\\\leq|\u2264", "<=", out, perl = TRUE)
+  out <- gsub("\\\\geq|\u2265", ">=", out, perl = TRUE)
+  out <- gsub("\\\\neq|\u2260", "!=", out, perl = TRUE)
+  out <- gsub("\\\\pm|\u00b1", "+/-", out, perl = TRUE)
+  out <- gsub("\\\\([a-zA-Z]+)", "\\1", out, perl = TRUE)
+  out[na] <- NA_character_
+  out
+}
+
+#' @keywords internal
+.math_operator_phrases <- c("> =", "< =", "! =", "= =", "+ / -")
+
 #' @title Preprocess Text Data
 #'
 #' @description
@@ -517,7 +542,7 @@ unite_cols <- function(df, listed_vars) {
 #' @param stopwords_language Character; language for stopwords (default: "en").
 #' @param custom_stopwords Character vector; additional words to remove (default: NULL).
 #' @param custom_valuetype Character; valuetype for custom_stopwords pattern matching, one of "glob", "regex", or "fixed" (default: "glob").
-#' @param math_mode Logical; if \code{TRUE}, preserve math content (numbers, operators, symbols) by forcing \code{remove_punct}, \code{remove_symbols}, and \code{remove_numbers} all to \code{FALSE}, then strip only sentence-end punctuation such as periods, commas, question marks, exclamation marks, colons, semicolons, parentheses, brackets, braces, quotation marks, em dashes, and en dashes. The \code{min_char} default of 2 still applies, so noisy single-character tokens are dropped; pass \code{min_char = 1} to keep them. Use for math or STEM corpora where multi-character operators and numerals carry meaning (default: FALSE).
+#' @param math_mode Logical; if \code{TRUE}, preserve math content (numbers, operators, symbols, and single-character tokens such as labels and units) by forcing \code{remove_punct}, \code{remove_symbols}, and \code{remove_numbers} all to \code{FALSE} and \code{min_char} to \code{1}, then strip only sentence-end punctuation such as periods, commas, question marks, exclamation marks, colons, semicolons, parentheses, brackets, braces, quotation marks, em dashes, and en dashes. Any explicitly supplied \code{min_char} is overridden. Use for math or STEM corpora where operators, numerals, one-letter labels ("angle A"), and one-letter units ("5 m") carry meaning (default: FALSE).
 #' @param verbose Logical; print verbose output (default: FALSE).
 #' @param ... Additional arguments passed to \code{quanteda::tokens}.
 #'
@@ -555,6 +580,7 @@ unite_cols <- function(df, listed_vars) {
 #'                                          verbose = FALSE)
 #' print(tokens)
 #' }
+
 prep_texts <- function(united_tbl,
                              text_field = "united_texts",
                              min_char = 2,
@@ -583,6 +609,9 @@ prep_texts <- function(united_tbl,
     remove_symbols <- FALSE
     remove_numbers <- FALSE
     min_char       <- 1L
+    if (text_field %in% names(united_tbl)) {
+      united_tbl[[text_field]] <- .normalize_math_notation(united_tbl[[text_field]])
+    }
   }
 
   start_time <- Sys.time()
@@ -632,9 +661,14 @@ prep_texts <- function(united_tbl,
     }
 
     if (math_mode) {
-      if (verbose) message("Math mode: stripping sentence-end punctuation (keeping math operators)...")
-      sentence_punct <- c(".", ",", "?", "!", ":", ";", "(", ")", "[", "]",
-                          "{", "}", "\"", "'", "`", "''", "``", "...",
+      if (verbose) message("Math mode: rejoining multi-character operators...")
+      tokens <- quanteda::tokens_compound(
+        tokens, pattern = quanteda::phrase(.math_operator_phrases),
+        concatenator = "", join = FALSE)
+
+      if (verbose) message("Math mode: stripping sentence-end punctuation (keeping operators and grouping)...")
+      sentence_punct <- c(".", ",", "?", "!", ":", ";",
+                          "\"", "'", "`", "''", "``", "...",
                           "\u2014", "\u2013")
       tokens <- quanteda::tokens_remove(tokens, pattern = sentence_punct,
                                         valuetype = "fixed", verbose = FALSE)
@@ -1427,4 +1461,164 @@ check_vision_models <- function(provider = "gemini", api_key = NULL) {
     available = FALSE,
     message = paste("Unknown provider:", provider)
   ))
+}
+
+#' @title Detect Corpus Language From Stopword Overlap
+#'
+#' @description
+#' Scores texts against snowball stopword lists and ranks candidate languages by
+#' the share of tokens matching each list. Uses only the `stopwords` package, so
+#' no language-detection dependency is added. Accuracy is good for European
+#' languages given a few hundred tokens, and poor for very short texts or
+#' languages absent from snowball; treat the result as a suggestion.
+#'
+#' @param texts Character vector of documents.
+#' @param languages Candidate language codes (default: all snowball languages).
+#' @param sample_n Maximum documents to sample (default 200).
+#' @param seed Seed for sampling.
+#'
+#' @return A tibble of `language` and `score` (share of tokens matching that
+#'   language's stopwords), ranked best first, or `NULL` when no tokens are
+#'   found. Ties and low scores mean the corpus language is unclear.
+#'
+#' @seealso [prep_texts()] for the `stopwords_language` argument this informs.
+#' @concept preprocessing
+#' @export
+detect_language <- function(texts,
+                            languages = stopwords::stopwords_getlanguages("snowball"),
+                            sample_n = 200, seed = 123) {
+  texts <- as.character(texts)
+  texts <- texts[!is.na(texts) & nzchar(trimws(texts))]
+  if (length(texts) == 0) return(NULL)
+  if (length(texts) > sample_n) {
+    texts <- withr::with_seed(seed, sample(texts, sample_n))
+  }
+  toks <- unlist(strsplit(tolower(paste(texts, collapse = " ")), "[^[:alpha:]']+"))
+  toks <- toks[nzchar(toks)]
+  if (length(toks) == 0) return(NULL)
+
+  scores <- vapply(languages, function(lg) {
+    sw <- tryCatch(stopwords::stopwords(lg, source = "snowball"), error = function(e) NULL)
+    if (is.null(sw)) return(NA_real_)
+    mean(toks %in% tolower(sw))
+  }, numeric(1))
+
+  out <- tibble::tibble(language = languages, score = unname(scores))
+  out <- out[!is.na(out$score), , drop = FALSE]
+  out[order(-out$score), , drop = FALSE]
+}
+
+#' @title Detect Corpus Language With an LLM
+#'
+#' @description
+#' Identifies the dominant language of a text sample by asking an LLM (OpenAI
+#' or Gemini) to pick one name from a candidate list. More accurate than
+#' [detect_language()] on short texts, mixed-language corpora, or languages
+#' with sparse snowball stopword coverage, at the cost of an API call.
+#'
+#' @param texts Character vector of documents.
+#' @param languages Named character vector of candidate languages (name =
+#'   display name, value = language code), e.g. `c(English = "en", French =
+#'   "fr")`.
+#' @param provider One of `"auto"`, `"openai"`, `"gemini"`. `"auto"` picks
+#'   whichever of `OPENAI_API_KEY` / `GEMINI_API_KEY` is set, or the key
+#'   implied by `api_key`'s prefix.
+#' @param model Model name (default depends on provider).
+#' @param api_key API key; falls back to the provider's environment variable.
+#' @param sample_n Maximum documents to sample for the prompt (default 200).
+#' @param seed Seed for sampling.
+#' @param verbose Logical, print status messages (default TRUE).
+#'
+#' @return A one-row tibble with `language` (code) and `provider`, or `NULL`
+#'   when no provider/key is available or the response doesn't match a
+#'   candidate.
+#'
+#' @seealso [detect_language()] for the local, no-API alternative; [call_llm_api()] for the direct provider call.
+#' @concept preprocessing
+#' @concept ai
+#' @export
+#'
+#' @examples
+#' if (interactive()) {
+#' detect_language_llm(
+#'   c("Bonjour, comment allez-vous?", "Je suis ravi de vous rencontrer."),
+#'   languages = c(English = "en", French = "fr", Spanish = "es"),
+#'   provider = "openai",
+#'   api_key = Sys.getenv("OPENAI_API_KEY")
+#' )
+#' }
+detect_language_llm <- function(texts,
+                                 languages,
+                                 provider = c("auto", "openai", "gemini"),
+                                 model = NULL,
+                                 api_key = NULL,
+                                 sample_n = 200,
+                                 seed = 123,
+                                 verbose = TRUE) {
+  provider <- match.arg(provider)
+
+  texts <- as.character(texts)
+  texts <- texts[!is.na(texts) & nzchar(trimws(texts))]
+  if (length(texts) == 0) return(NULL)
+  if (length(texts) > sample_n) {
+    texts <- withr::with_seed(seed, sample(texts, sample_n))
+  }
+  sample_text <- substr(paste(texts, collapse = " "), 1, 2000)
+
+  if (provider == "auto") {
+    if (nzchar(Sys.getenv("OPENAI_API_KEY")) || (!is.null(api_key) && grepl("^sk-", api_key))) {
+      provider <- "openai"
+    } else if (nzchar(Sys.getenv("GEMINI_API_KEY")) || (!is.null(api_key) && grepl("^AIza", api_key))) {
+      provider <- "gemini"
+    } else {
+      if (verbose) message("No AI provider available. Set OPENAI_API_KEY or GEMINI_API_KEY.")
+      return(NULL)
+    }
+  }
+
+  setup <- .resolve_llm_setup(
+    provider, model, api_key,
+    defaults = list(openai = "gpt-4.1-mini", gemini = "gemini-2.5-flash-lite"),
+    strict_validate = TRUE
+  )
+  if (is.null(setup)) return(NULL)
+  model <- setup$model
+  api_key <- setup$api_key
+
+  prompt <- paste0(
+    "Identify the dominant language of the text sample below. Respond with ONLY ",
+    "one language name from this list, exactly as written, nothing else: ",
+    paste(names(languages), collapse = ", "), ".\n\nText sample:\n", sample_text
+  )
+
+  if (verbose) message("Detecting corpus language using ", provider, " (", model, ")...")
+
+  response_text <- tryCatch(
+    call_llm_api(
+      provider = provider,
+      system_prompt = "You are a precise language identification assistant. Respond with only the language name, no punctuation or explanation.",
+      user_prompt = prompt,
+      model = model,
+      temperature = 0,
+      max_tokens = 10,
+      api_key = api_key
+    ),
+    error = function(e) {
+      if (verbose) message("Language detection failed: ", e$message)
+      NULL
+    }
+  )
+  if (is.null(response_text) || !nzchar(trimws(response_text))) return(NULL)
+
+  detected <- trimws(response_text)
+  match_idx <- which(tolower(names(languages)) == tolower(detected))
+  if (length(match_idx) == 0) {
+    match_idx <- which(vapply(names(languages), function(nm) grepl(nm, detected, ignore.case = TRUE), logical(1)))
+  }
+  if (length(match_idx) == 0) {
+    if (verbose) message("Response did not match a candidate language: ", detected)
+    return(NULL)
+  }
+
+  tibble::tibble(language = unname(languages[match_idx[1]]), provider = provider, model = model)
 }

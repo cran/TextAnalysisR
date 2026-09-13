@@ -1,0 +1,204 @@
+---
+title: "Qualitative Coding"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Qualitative Coding}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(message = FALSE, warning = FALSE)
+```
+
+Codes from a codebook are assigned to units of text, then inter-coder agreement is measured. AI
+supplies suggestions; a human confirms, corrects, or rejects each one, and only reviewed rows are
+exported.
+
+Steps that call an AI provider are shown as code rather than run. The rest run on synthetic data.
+
+```{r}
+library(TextAnalysisR)
+```
+
+## Codebook
+
+A data frame with `code` and `definition`, plus an optional `example`.
+
+```{r}
+codebook <- tibble::tibble(
+  code = c("access", "instruction", "assessment"),
+  definition = c(
+    "Availability of technology, materials, or services to students",
+    "Teaching methods, strategies, or curriculum delivery",
+    "Measurement of student performance or progress"
+  ),
+  example = c(
+    "tablets were provided to every student",
+    "the teacher modeled each step before practice",
+    "progress was measured with weekly probes"
+  )
+)
+codebook
+```
+
+## AI Coding
+
+`apply_codes()` splits each document into units, sends each unit with the codebook, and returns one
+row per unit-code pair.
+
+```{r eval = FALSE}
+texts <- SpecialEduTech$abstract[1:20]
+names(texts) <- paste0("doc", seq_along(texts))
+
+suggestions <- apply_codes(
+  texts,
+  codebook,
+  unit = "paragraph",
+  max_codes = 3,
+  provider = "gemini"
+)
+```
+
+| Argument | Effect |
+|----------|--------|
+| `unit` | Splits on sentences, paragraphs, or whole documents. Paragraph is the usual unit of analysis. |
+| `max_codes` | Allows a unit to carry none, one, or several codes. A unit that fits nothing returns `NA`. |
+| `provider` | Selects OpenAI or Gemini. `auto` picks whichever key is available. |
+
+Columns `start` and `end` give character offsets of the unit inside its document.
+
+## Review
+
+Only accepted and edited rows reach the export.
+
+```{r eval = FALSE}
+review <- subset(suggestions, status == "ok")
+review$coder <- "coder1"
+```
+
+`code_retest()` codes the same sample more than once and reports how often the runs agree, next to a
+baseline from shuffled labels.
+
+```{r eval = FALSE}
+stability <- code_retest(texts, codebook, n_runs = 2, sample_n = 20)
+stability$summary
+```
+
+`uncoded_units()` returns the units that received no code, with the text sliced from the recorded
+offsets.
+
+```{r}
+# synthetic units, paraphrased from the corpus
+suggestions <- tibble::tibble(
+  doc_id  = c("d1", "d1", "d2"),
+  unit_id = c("d1.1", "d1.2", "d2.1"),
+  start   = c(1L, 68L, 1L),
+  end     = c(66L, 128L, 74L),
+  code    = c("access", NA_character_, NA_character_)
+)
+
+texts <- c(
+  d1 = paste("Text-to-speech tools give students access to grade-level readings.",
+             "Teachers report growing confidence after the training series."),
+  d2 = "The review summarizes methodological features across the included studies."
+)
+
+uncoded_units(suggestions, texts)
+```
+
+## Agreement
+
+`code_agreement()` takes assignments from two or more coders.
+
+```{r}
+# synthetic assignments
+assignments <- tibble::tibble(
+  doc_id = rep(paste0("doc", 1:10), each = 2),
+  code   = c("access", "access", "access", "access", "access", "access",
+             "instruction", "instruction", "instruction", "instruction",
+             "instruction", "assessment", "assessment", "assessment",
+             "assessment", "assessment", "assessment", "access",
+             "access", "access"),
+  coder  = rep(c("c1", "c2"), times = 10)
+)
+
+agreement <- code_agreement(assignments)
+agreement$overall
+```
+
+`n` is how many units each statistic used.
+
+| `metric` | Reads as |
+|----------|----------|
+| `percent` | Raw share of units both coders labeled identically. No correction for chance. |
+| `pabak` | Prevalence-adjusted bias-adjusted kappa: percent agreement rescaled to the -1 to 1 range. |
+| `ac1` | Gwet's agreement coefficient. Chance-corrected, stable when one code dominates. |
+| `kappa` | Cohen's kappa for two coders, Fleiss' for more. Chance-corrected against observed marginals. |
+| `alpha` | Krippendorff's alpha. Chance-corrected, handles missing units. |
+
+Which units the coders differed on:
+
+```{r}
+agreement$disagree
+```
+
+Which codes carry those disagreements:
+
+```{r}
+agreement$by_code
+```
+
+Each code is scored as a yes/no indicator, so a two-code corpus returns the same figures twice, one
+indicator being the other's complement.
+
+Chance-corrected statistics turn negative when observed agreement falls below what the marginals
+predict, which happens when nearly every unit carries the same code:
+
+```{r}
+# synthetic assignments, one code dominating
+skewed <- tibble::tibble(
+  doc_id = rep(paste0("doc", 1:8), each = 2),
+  code   = c("access", "access", "access", "access", "access", "access",
+             "access", "access", "access", "access", "access", "access",
+             "access", "instruction", "instruction", "access"),
+  coder  = rep(c("c1", "c2"), times = 8)
+)
+
+code_agreement(skewed, by_code = FALSE)$overall
+```
+
+Chance alone accounts for 0.78 against an observed 0.75, so `kappa` lands at -0.14. Only `percent`
+is bounded at zero.
+
+`codebook_authors` adds an `independent` table computed among the remaining coders alone.
+
+```{r eval = FALSE}
+code_agreement(assignments, codebook_authors = "c1")$independent
+```
+
+Everything above assumes coders shared units. When each coder highlights their own stretch of text,
+`align = "coverage"` compares the highlights instead. `start` and `end` are character positions.
+
+```{r}
+# synthetic spans
+spans <- tibble::tibble(
+  doc_id = c("doc1", "doc1", "doc1"),
+  coder  = c("c1", "c1", "c2"),
+  code   = c("access", "instruction", "access"),
+  start  = c(1, 200, 50),
+  end    = c(100, 300, 80)
+)
+
+code_agreement(spans, align = "coverage")$overall
+```
+
+`c2`'s span sits inside `c1`'s first one. One of `c1`'s two spans was matched, so 0.50; `c2`'s only
+span was matched, so 1.00. Both directions are reported.
+
+## Combining Coder Files
+
+```{r eval = FALSE}
+combined <- merge_codes(c("coder1.csv", "coder2.xlsx"))
+code_agreement(combined)$overall
+```

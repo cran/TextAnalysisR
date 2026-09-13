@@ -2,7 +2,7 @@
 % Please edit documentation in R/topic_modeling.R
 \name{fit_embedding_topics}
 \alias{fit_embedding_topics}
-\title{Embedding-based Topic Modeling (Deprecated)}
+\title{Embedding-Based Topic Modeling (Deprecated)}
 \usage{
 fit_embedding_topics(
   texts,
@@ -81,7 +81,7 @@ Higher values require stronger evidence for reassignment.}
 \item{verbose}{Logical, if TRUE, prints progress messages.}
 
 \item{precomputed_embeddings}{Optional matrix of pre-computed document embeddings.
-If provided, skips embedding generation for improved performance. Must have
+If provided, skips embedding generation to avoid recomputation. Must have
 the same number of rows as the length of texts.}
 }
 \value{

@@ -343,7 +343,7 @@ code > span.er { color: #a61717; background-color: #e3d2d2; }
 
 <div class="sourceCode" id="cb1"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb1-1"><a href="#cb1-1" tabindex="-1"></a><span class="fu">library</span>(TextAnalysisR)</span>
 <span id="cb1-2"><a href="#cb1-2" tabindex="-1"></a><span class="fu">packageVersion</span>(<span class="st">&quot;TextAnalysisR&quot;</span>)</span></code></pre></div>
-<pre><code>## [1] &#39;0.1.4&#39;</code></pre>
+<pre><code>## [1] &#39;0.1.5&#39;</code></pre>
 <div class="sourceCode" id="cb3"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb3-1"><a href="#cb3-1" tabindex="-1"></a><span class="fu">data</span>(<span class="st">&quot;SpecialEduTech&quot;</span>)</span>
 <span id="cb3-2"><a href="#cb3-2" tabindex="-1"></a><span class="fu">nrow</span>(SpecialEduTech)</span></code></pre></div>
 <pre><code>## [1] 490</code></pre>
@@ -387,10 +387,12 @@ code > span.er { color: #a61717; background-color: #e3d2d2; }
 </div>
 <div id="r-package" class="section level2">
 <h2>R Package</h2>
-<div class="sourceCode" id="cb7"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb7-1"><a href="#cb7-1" tabindex="-1"></a><span class="fu">install.packages</span>(<span class="st">&quot;TextAnalysisR&quot;</span>,</span>
-<span id="cb7-2"><a href="#cb7-2" tabindex="-1"></a>  <span class="at">repos =</span> <span class="fu">c</span>(<span class="st">&quot;https://mshin77.r-universe.dev&quot;</span>, <span class="st">&quot;https://cloud.r-project.org&quot;</span>))</span>
-<span id="cb7-3"><a href="#cb7-3" tabindex="-1"></a><span class="fu">library</span>(TextAnalysisR)</span>
-<span id="cb7-4"><a href="#cb7-4" tabindex="-1"></a><span class="fu">run_app</span>()</span></code></pre></div>
+<p>From CRAN:</p>
+<div class="sourceCode" id="cb7"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb7-1"><a href="#cb7-1" tabindex="-1"></a><span class="fu">install.packages</span>(<span class="st">&quot;TextAnalysisR&quot;</span>)</span>
+<span id="cb7-2"><a href="#cb7-2" tabindex="-1"></a><span class="fu">library</span>(TextAnalysisR)</span>
+<span id="cb7-3"><a href="#cb7-3" tabindex="-1"></a><span class="fu">run_app</span>()</span></code></pre></div>
+<p>Development version from R-universe:</p>
+<div class="sourceCode" id="cb8"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb8-1"><a href="#cb8-1" tabindex="-1"></a><span class="fu">install.packages</span>(<span class="st">&quot;TextAnalysisR&quot;</span>, <span class="at">repos =</span> <span class="st">&quot;https://mshin77.r-universe.dev&quot;</span>)</span></code></pre></div>
 <p>Requirements: R &gt;= 4.0, RStudio recommended</p>
 </div>
 <div id="web-app" class="section level2">
@@ -409,7 +411,7 @@ Python with <code>TextAnalysisR::setup_python_env()</code>.</p>
 </div>
 <div id="python-features" class="section level3">
 <h3>Python Features</h3>
-<p>For embeddings and neural sentiment analysis, run
+<p>For embeddings and transformer-based sentiment analysis, run
 <code>setup_python_env()</code>. Requires Python 3.9+.</p>
 </div>
 </div>

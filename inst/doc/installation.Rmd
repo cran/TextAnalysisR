@@ -33,11 +33,18 @@ Python is optional. Core analyses run in plain R; cloud AI providers
 
 ## R Package
 
+From CRAN:
+
 ```{r, eval = FALSE}
-install.packages("TextAnalysisR",
-  repos = c("https://mshin77.r-universe.dev", "https://cloud.r-project.org"))
+install.packages("TextAnalysisR")
 library(TextAnalysisR)
 run_app()
+```
+
+Development version from R-universe:
+
+```{r, eval = FALSE}
+install.packages("TextAnalysisR", repos = "https://mshin77.r-universe.dev")
 ```
 
 Requirements: R >= 4.0, RStudio recommended
@@ -56,7 +63,7 @@ For lemmatization, POS tagging, and named entity recognition, set up Python with
 
 ### Python Features
 
-For embeddings and neural sentiment analysis, run `setup_python_env()`. Requires Python 3.9+.
+For embeddings and transformer-based sentiment analysis, run `setup_python_env()`. Requires Python 3.9+.
 
 ## Troubleshooting
 

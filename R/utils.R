@@ -188,7 +188,7 @@ show_web_banner <- function(disabled = NULL) {
           "For full features: ",
           shiny::tags$code(
             style = "background: #F3F4F6; padding: 2px 6px; border-radius: 3px; font-size: 13px;",
-            "install.packages('TextAnalysisR', repos = c('https://mshin77.r-universe.dev', 'https://cloud.r-project.org'))"
+            "install.packages('TextAnalysisR')"
           )
         ),
         shiny::HTML(paste0("<ul style='margin: 5px 0; padding-left: 20px; color: #6B7280;'>", feature_list, "</ul>"))
@@ -216,7 +216,7 @@ require_feature <- function(feature, session = NULL) {
     "python" = "Python not configured. Run setup_python_env().",
     "pdf_tables" = "PDF tables require Python. Run setup_python_env().",
     "embeddings" = "Embeddings require sentence-transformers. Run: pip install sentence-transformers torch",
-    "sentiment_transformer" = "Neural sentiment requires transformers. Run: pip install transformers torch",
+    "sentiment_transformer" = "Transformer sentiment requires transformers. Run: pip install transformers torch",
     paste0("Feature '", feature, "' not available.")
   )
 
@@ -1183,7 +1183,8 @@ call_gemini_chat <- function(system_prompt,
       temperature = temperature,
       maxOutputTokens = max_tokens,
       thinkingConfig = list(
-        thinkingBudget = 1024
+        # thinking tokens count against maxOutputTokens; a budget here starves short replies
+        thinkingBudget = if (max_tokens < 512) 0L else 1024L
       )
     )
   )
@@ -1229,14 +1230,25 @@ call_gemini_chat <- function(system_prompt,
     }
   }
 
-  stop("Unexpected response structure from Gemini API")
+  finish <- tryCatch(res_json$candidates[[1]]$finishReason, error = function(e) NULL)
+  thoughts <- tryCatch(res_json$usageMetadata$thoughtsTokenCount, error = function(e) NULL)
+  if (identical(finish, "MAX_TOKENS")) {
+    stop(sprintf(
+      "Gemini returned no text: hit maxOutputTokens (%d) after %s thinking tokens. Raise max_tokens or disable thinking.",
+      max_tokens, thoughts %||% 0), call. = FALSE)
+  }
+  if (identical(finish, "SAFETY") || identical(finish, "PROHIBITED_CONTENT")) {
+    stop("Gemini blocked the response (finishReason: ", finish, ").", call. = FALSE)
+  }
+  stop("Unexpected response structure from Gemini API",
+       if (!is.null(finish)) paste0(" (finishReason: ", finish, ")") else "", call. = FALSE)
 }
 
 
-#' Call LLM API (Unified Wrapper)
+#' Call LLM API
 #'
 #' @description
-#' Unified wrapper for calling different LLM providers (OpenAI, Gemini).
+#' Calls different LLM providers (OpenAI, Gemini) through a single interface.
 #' Automatically routes to the appropriate provider-specific function.
 #'
 #' @param provider Character string: "openai" or "gemini"

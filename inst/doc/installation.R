@@ -10,8 +10,10 @@ nrow(SpecialEduTech)
 head(SpecialEduTech[, c("title", "year")], 3)
 
 ## ----eval = FALSE-------------------------------------------------------------
-# install.packages("TextAnalysisR",
-#   repos = c("https://mshin77.r-universe.dev", "https://cloud.r-project.org"))
+# install.packages("TextAnalysisR")
 # library(TextAnalysisR)
 # run_app()
+
+## ----eval = FALSE-------------------------------------------------------------
+# install.packages("TextAnalysisR", repos = "https://mshin77.r-universe.dev")
 

@@ -241,6 +241,7 @@ ui <- fluidPage(
                 class = "nav nav-pills nav-stacked",
                 id = "home_nav_menu",
                 tags$li(tags$a(href = "#about-tab", "data-toggle" = "tab", "About")),
+                tags$li(tags$a(href = "#language-tab", "data-toggle" = "tab", "Language")),
                 tags$li(tags$a(href = "#semantic-tab", "data-toggle" = "tab", "Semantic Analysis")),
                 tags$li(tags$a(href = "#lexicon-tab", "data-toggle" = "tab", "Sentiment Lexicons")),
                 tags$li(tags$a(href = "#cyber-tab", "data-toggle" = "tab", "Cybersecurity")),
@@ -255,6 +256,7 @@ ui <- fluidPage(
             tags$div(
               class = "tab-content",
               tags$div(id = "about-tab", class = "tab-pane", div(id = "about-content", class = "markdown-content", uiOutput("about_content"))),
+              tags$div(id = "language-tab", class = "tab-pane", div(id = "language-content", class = "markdown-content", uiOutput("language_content"))),
               tags$div(id = "semantic-tab", class = "tab-pane", div(id = "installation-semantic-content", class = "markdown-content", uiOutput("installation_semantic_content"))),
               tags$div(id = "lexicon-tab", class = "tab-pane", div(id = "installation-lexical-content", class = "markdown-content", uiOutput("installation_lexical_content"))),
               tags$div(id = "cyber-tab", class = "tab-pane", div(id = "cybersecurity-content", class = "markdown-content", uiOutput("cybersecurity_content"))),
@@ -276,7 +278,7 @@ ui <- fluidPage(
             tags$span("OPTIONAL", style = "background-color: #6c757d; color: white; padding: 2px 8px; border-radius: 3px; font-size: 13px; margin-left: 8px;"),
             style = "color: #4269BF; margin-bottom: 10px;"
           ),
-          tags$p(style = "font-size: 16px; color: #666;", "API keys entered here apply to all AI features. You can also enter keys per-feature."),
+          tags$p(class = "text-muted", style = "font-size: 16px;", "API keys entered here apply to all AI features. You can also enter keys per-feature."),
           .password_input("global_openai_api_key", "OpenAI API Key:", placeholder = "sk-..."),
           .password_input("global_gemini_api_key", "Gemini API Key:", placeholder = "AIza..."),
           tags$hr(),
@@ -284,7 +286,7 @@ ui <- fluidPage(
             HTML("<strong>Usage Log</strong>"),
             style = "color: #4269BF; margin-bottom: 10px;"
           ),
-          tags$p(style = "font-size: 16px; color: #666;", "Track which AI models were used (for reproducibility reporting)."),
+          tags$p(class = "text-muted", style = "font-size: 16px;", "Track which AI models were used (for reproducibility reporting)."),
           downloadButton("download_ai_log", "Download Log as CSV", class = "btn-secondary btn-block")
         ),
         mainPanel(
@@ -312,6 +314,11 @@ ui <- fluidPage(
                 ),
                 tags$tbody(
                   tags$tr(
+                    tags$td("Stopword Language Detection"),
+                    tags$td("OpenAI, Gemini (falls back to a local heuristic without a key)"),
+                    tags$td("Preprocess")
+                  ),
+                  tags$tr(
                     tags$td("Document Similarity"),
                     tags$td("Sentence Transformers, OpenAI, Gemini"),
                     tags$td("Semantic Analysis")
@@ -332,8 +339,18 @@ ui <- fluidPage(
                     tags$td("Semantic Analysis")
                   ),
                   tags$tr(
+                    tags$td("Cluster Labels"),
+                    tags$td("OpenAI, Gemini"),
+                    tags$td("Semantic Analysis")
+                  ),
+                  tags$tr(
                     tags$td("Topic Modeling Embeddings"),
                     tags$td("Sentence Transformers, OpenAI, Gemini"),
+                    tags$td("Topic Modeling")
+                  ),
+                  tags$tr(
+                    tags$td("K Recommendation"),
+                    tags$td("OpenAI, Gemini"),
                     tags$td("Topic Modeling")
                   ),
                   tags$tr(
@@ -345,6 +362,16 @@ ui <- fluidPage(
                     tags$td("Vision OCR"),
                     tags$td("OpenAI, Gemini"),
                     tags$td("Upload")
+                  ),
+                  tags$tr(
+                    tags$td("Qualitative Coding Suggestions"),
+                    tags$td("OpenAI, Gemini"),
+                    tags$td("Qualitative Coding")
+                  ),
+                  tags$tr(
+                    tags$td("Qualitative Coding Retest"),
+                    tags$td("OpenAI, Gemini"),
+                    tags$td("Qualitative Coding")
                   )
                 )
               ),
@@ -355,7 +382,12 @@ ui <- fluidPage(
                 tags$p(style = "margin: 0 0 6px 0; font-size: 16px; color: #5C6E88;",
                   tags$strong("OpenAI"), " \u2014 Cloud API. Enter key above or set ", tags$code("OPENAI_API_KEY"), " in .Renviron."),
                 tags$p(style = "margin: 0; font-size: 16px; color: #5C6E88;",
-                  tags$strong("Gemini"), " \u2014 Cloud API. Enter key above or set ", tags$code("GEMINI_API_KEY"), " in .Renviron.")
+                  tags$strong("Gemini"),
+                  if (has_server_gemini) {
+                    " \u2014 Cloud API. Google Cloud Research credits \u2014 no key needed here."
+                  } else {
+                    list(" \u2014 Cloud API. Enter key above or set ", tags$code("GEMINI_API_KEY"), " in .Renviron.")
+                  })
               )
             )
           )
@@ -435,7 +467,21 @@ Supports:
               label = NULL,
               choices = NULL
             )),
-            actionButton("apply", "Apply", class = "btn-primary btn-block")
+            actionButton("apply", "Apply", class = "btn-primary btn-block"),
+            tags$hr(style = "margin: 16px 0 12px;"),
+            tags$h5(
+              tags$strong("Unit of analysis"),
+              style = "color: #4269BF; margin-bottom: 8px;"
+            ),
+            selectInput(
+              "analysis_unit",
+              label = NULL,
+              choices = c("Sentences" = "sentence", "Paragraphs" = "paragraph",
+                          "Whole documents" = "document"),
+              selected = "paragraph"
+            ),
+            tags$p("Splits on sentences, paragraphs, or whole documents. Paragraph is the usual unit of analysis. Clustering, topic modeling, and coding all read this. Changing it after a model runs makes that model's categories describe different objects.",
+                   style = "font-size: 13px; color: #475569; margin-top: -8px;")
           ),
           conditionalPanel(
             condition = "input.conditioned == 2",
@@ -608,6 +654,17 @@ Supports:
                 create = TRUE,
                 placeholder = "Type to add more or modify"
               )
+            ),
+            selectInput(
+              "stopwords_language",
+              "Stopword language",
+              choices = .stopword_languages,
+              selected = "en"
+            ),
+            div(
+              style = "margin-top: -8px; margin-bottom: 12px;",
+              actionLink("detect_stopwords_language", "Detect from corpus", icon = .ai_mark(),
+                         style = "font-size: 16px;")
             ),
             div(
               class = "stopwords-container",
@@ -862,6 +919,10 @@ Supports:
     tabPanel(
       "Topic Modeling",
       uiOutput("topic_modeling_ui")
+    ),
+    tabPanel(
+      "Qualitative Coding",
+      uiOutput("qualitative_coding_ui")
     )
   )
   )

@@ -1,6 +1,6 @@
 Package: TextAnalysisR
 Title: A Text Mining Workflow Tool
-Version: 0.1.4
+Version: 0.1.5
 Authors@R: 
     person("Mikyung", "Shin", , "shin.mikyung@gmail.com", role = c("aut", "cre"),
            comment = c(ORCID = "0000-0001-7907-9193"))
@@ -20,16 +20,17 @@ Language: en-US
 Encoding: UTF-8
 LazyData: true
 LazyDataCompression: xz
-Imports: dplyr, DT, ggplot2, htmltools, htmlwidgets, igraph, magrittr,
-        Matrix, methods, quanteda, quanteda.textstats, RColorBrewer,
-        rlang, scales, shiny, tibble, tidyr, tidytext, widyr, withr
-Suggests: aricode, tidylo, broom, patchwork, cluster, clusterCrit,
-        colourpicker, covr, dbscan, digest, httr, jsonlite, knitr,
-        markdown, MASS, moments, numform, officer, openxlsx, pdftools,
-        progress, proxy, pscl, purrr, readxl, reticulate (>= 1.28),
-        rmarkdown, roxygen2, Rtsne, shinyBS, shinybusy, shinyjs,
-        spelling, stm, stopwords, stringr, syuzhet, testthat (>=
-        3.0.0), textdata, umap, plotly
+Imports: dplyr, DT, ggplot2, grDevices, htmltools, htmlwidgets, igraph,
+        magrittr, Matrix, methods, quanteda, quanteda.textstats,
+        RColorBrewer, rlang, scales, shiny, stats, tibble, tidyr,
+        tidytext, tools, utils, widyr, withr
+Suggests: aricode, tidylo, betareg, broom, patchwork, class, cluster,
+        clusterCrit, colourpicker, covr, dbscan, digest, httr, irr,
+        jsonlite, knitr, markdown, MASS, moments, nnet, numform,
+        officer, openxlsx, pdftools, progress, proxy, pscl, purrr,
+        readxl, reticulate (>= 1.28), rmarkdown, roxygen2, Rtsne,
+        shinyBS, shinybusy, shinyjs, spelling, stm, stopwords, stringr,
+        syuzhet, testthat (>= 3.0.0), textdata, umap, webshot2, plotly
 Depends: R (>= 4.0)
 SystemRequirements: Python (>= 3.8) with spaCy (>= 3.5) for
         lemmatization and sentence-transformers (>= 2.2) for embeddings
@@ -41,9 +42,9 @@ VignetteBuilder: knitr
 Config/testthat/edition: 3
 Config/roxygen2/version: 8.0.0
 NeedsCompilation: no
-Packaged: 2026-07-17 17:44:05 UTC; shinm
+Packaged: 2026-09-13 06:20:59 UTC; shinm
 Author: Mikyung Shin [aut, cre] (ORCID:
     <https://orcid.org/0000-0001-7907-9193>)
 Maintainer: Mikyung Shin <shin.mikyung@gmail.com>
 Repository: CRAN
-Date/Publication: 2026-07-27 14:40:13 UTC
+Date/Publication: 2026-09-13 07:00:02 UTC
